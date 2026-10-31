@@ -94,6 +94,7 @@
 }
 - (NSDictionary *)readNote:(NSString *)noteID error:(NSError **)error {
     if(![self prepare:error]) return nil;
+    for (NSUInteger attempt=0;attempt<3;attempt++) {
     id<NPNotesObject> note=[self note:noteID];
     NSString *identifier=note.id;
     NSString *name=note.name;
@@ -102,14 +103,25 @@
     NSString *html=locked?@"":note.body;
     NSString *plain=locked?@"":note.plaintext;
     NSUInteger attachments=locked?0:note.attachments.count;
+    NSString *verifiedHTML=locked?@"":note.body;
+    NSDate *verifiedModified=note.modificationDate;
+    BOOL verifiedLocked=note.passwordProtected, verifiedShared=note.shared;
+    NSUInteger verifiedAttachments=verifiedLocked?0:note.attachments.count;
     if(![self finish:error]) return nil;
     if(!identifier) {
         if(error) *error=[NSError errorWithDomain:@"NotesPlus" code:3 userInfo:@{NSLocalizedDescriptionKey:@"메모가 이동되었거나 삭제되었습니다."}];
         return nil;
     }
+    if (![(html?:@"") isEqualToString:(verifiedHTML?:@"")] || ![(modified?:NSDate.distantPast) isEqualToDate:(verifiedModified?:NSDate.distantPast)] || locked!=verifiedLocked || shared!=verifiedShared || attachments!=verifiedAttachments) {
+        // Body, plaintext and metadata are separate Apple Events. Reject a torn read.
+        continue;
+    }
     return @{@"id":identifier,@"name":name?:@"새 메모",@"html":html?:@"",@"plain":plain?:@"",
         @"locked":@(locked),@"shared":@(shared),@"attachments":@(attachments),
         @"modified":modified?:NSDate.distantPast,@"created":created?:NSDate.distantPast};
+    }
+    if(error) *error=[NSError errorWithDomain:@"NotesPlus" code:425 userInfo:@{NSLocalizedDescriptionKey:@"메모가 변경 중입니다. 안정된 내용을 다시 확인합니다."}];
+    return nil;
 }
 - (NSDictionary *)createNoteInFolder:(NSString *)folderID html:(NSString *)html error:(NSError **)error {
     if(![self prepare:error]) return nil;

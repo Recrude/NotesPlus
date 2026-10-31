@@ -11,15 +11,16 @@ struct NoteSummary: Identifiable, Equatable {
     init(_ d: [String: Any]) { id=d["id"] as? String ?? ""; name=d["name"] as? String ?? "새 메모"; modified=d["modified"] as? Date ?? .distantPast; created=d["created"] as? Date ?? modified }
 }
 struct NoteSnapshot {
-    let id: String; let name: String; let html: String; var text: String; let modified: Date; let created:Date; var profile: EditingProfile; var document:NoteDocument?
+    let id: String; let name: String; let html: String; var text: String; let modified: Date; let created:Date; var profile: EditingProfile; var document:NoteDocument?; let inconsistentBody:Bool
     init(_ d: [String: Any]) {
         id=d["id"] as? String ?? ""; name=d["name"] as? String ?? ""; html=d["html"] as? String ?? ""; text=d["plain"] as? String ?? ""; modified=d["modified"] as? Date ?? .distantPast; created=d["created"] as? Date ?? modified
         profile=NoteCodec.profile(html: html, plaintext: text, locked:(d["locked"] as? NSNumber)?.boolValue ?? false, shared:(d["shared"] as? NSNumber)?.boolValue ?? false, attachments:(d["attachments"] as? NSNumber)?.intValue ?? 0)
         document=NoteCodec.document(html:html,plaintext:text,profile:profile)
+        inconsistentBody=profile.editable && document==nil
         if profile.editable,document==nil {profile.reason="서식 구조를 보존할 수 없습니다 · 기본 메모에서 편집"}
     }
 }
-struct LocalDraft: Codable, Sendable { let id: String; let originalHTML: String; var text: String; let modified: Date; var pendingTitleTemplate:String? = nil; var document:NoteDocument? = nil }
+struct LocalDraft: Codable, Sendable { let id: String; let originalHTML: String; var text: String; let modified: Date; var pendingTitleTemplate:String? = nil; var document:NoteDocument? = nil; var baseDocument:NoteDocument? = nil }
 
 @MainActor final class NotesModel: ObservableObject {
     @Published var folders: [NoteFolder] = []
@@ -40,6 +41,7 @@ struct LocalDraft: Codable, Sendable { let id: String; let originalHTML: String;
     @Published var status = ""
     @Published var errorMessage: String?
     @Published var hasConflict = false
+    @Published var conflictSnapshot:NoteSnapshot?
     @Published var previews: [String:String] = [:]
     @Published var focusEditorToken = UUID()
     let settings = EditorSettings()
@@ -70,6 +72,7 @@ struct LocalDraft: Codable, Sendable { let id: String; let originalHTML: String;
     private let debounce: UInt64?
     private var lastPoll=Date.distantPast
     private var newNoteProfiles:[String:EditingProfile]=[:]
+    private var histories:[String:SyncHistory]=[:]
     var dirty:Bool {snapshot != nil && editVersion != savedEditVersion}
     var selectedFolder: NoteFolder? { folders.first { $0.id == selectedFolderID } }
     var visibleNotes:[NoteSummary] {
@@ -157,12 +160,31 @@ struct LocalDraft: Codable, Sendable { let id: String; let originalHTML: String;
     private func install(_ note:NoteSnapshot,restoreDraft:Bool) {
         revision &+= 1; editVersion &+= 1; savedEditVersion=editVersion; unsavedSince=nil; composing=false; retryCount=0
         UserDefaults.standard.set(note.id,forKey:"lastNoteID")
-        selectedNoteID=note.id; snapshot=note; text=note.document?.text ?? note.text; editorDocument=note.document; editorLoadVersion &+= 1; hasConflict=false; status=""; errorMessage=nil
+        selectedNoteID=note.id; snapshot=note; text=note.document?.text ?? note.text; editorDocument=note.document; editorLoadVersion &+= 1; hasConflict=false; conflictSnapshot=nil; status=""; errorMessage=nil
         previews[note.id]=preview(note.text)
-        if restoreDraft, let data=try? Data(contentsOf:draftURL(note.id)), let draft=try? JSONDecoder().decode(LocalDraft.self,from:data), (draft.text != note.text || draft.pendingTitleTemplate != nil) {
+        if histories[note.id]==nil {
+            histories[note.id]=(try? Data(contentsOf:historyURL(note.id))).flatMap{try? JSONDecoder().decode(SyncHistory.self,from:$0)} ?? SyncHistory(id:note.id)
+        }
+        if restoreDraft, let data=try? Data(contentsOf:draftURL(note.id)), let draft=try? JSONDecoder().decode(LocalDraft.self,from:data), (draft.document?.equivalent(to:note.document ?? NoteDocument(text:note.text)) == false || NoteCodec.normalized(draft.text) != NoteCodec.normalized(note.text) || draft.pendingTitleTemplate != nil) {
             if let title=draft.pendingTitleTemplate {newNoteProfiles[note.id]=EditingProfile(titleTemplate:title)}
-            text=draft.text; editorDocument=draft.document ?? NoteDocument(text:draft.text); editVersion &+= 1; unsavedSince=Date(); hasConflict=draft.originalHTML != note.html
+            text=draft.text
+            // Older versions could capture a stale text view alongside newer plain
+            // text. Never show that partial document over the complete saved draft.
+            if let document=draft.document,NoteCodec.normalized(document.text)==NoteCodec.normalized(draft.text) {editorDocument=document}
+            else {editorDocument=NoteDocument(text:draft.text)}
+            editVersion &+= 1; unsavedSince=Date()
+            // Legacy drafts lack baseDocument. Parsing their original HTML against the
+            // current text succeeds only if the old base still has the same structure.
+            let base=NoteSnapshot(["id":draft.id,"html":draft.originalHTML,"plain":draft.baseDocument?.text ?? note.text])
+            hasConflict=draft.originalHTML != note.html && !sameContent(base,note)
+            conflictSnapshot=hasConflict ? note : nil
             status=hasConflict ? "원본과 다른 초안을 보관 중입니다." : "초안을 복원했습니다."
+        } else if restoreDraft,let latest=histories[note.id]?.revisions.last,
+                  latest.modified>note.modified,let document=latest.document,
+                  histories[note.id]?.contains(note)==true, note.document?.equivalent(to:document)==false {
+            // A previously acknowledged write remains recoverable across app restarts.
+            text=document.text; editorDocument=document; editVersion &+= 1; unsavedSince=Date()
+            status="이전 저장본을 확인 중입니다. 최신 작성 내용을 유지했습니다."
         }
     }
     func edited(_ value:String,composing isComposing:Bool = false) {
@@ -257,12 +279,24 @@ struct LocalDraft: Codable, Sendable { let id: String; let originalHTML: String;
             persistDraft()
             do {
                 try await backup(original)
-                let saved=try await writePreservingCanonicalChanges(original,html:html)
+                var saved=try await writePreservingCanonicalChanges(original,html:html,document:submittedDocument)
+                // Apple Events can acknowledge the write before Notes exposes the new body.
+                // Wait for readback rather than treating our own previous version as a conflict.
+                for delay in [100_000_000,250_000_000,500_000_000] as [UInt64] {
+                    if saved.document?.equivalent(to:submittedDocument)==true {break}
+                    guard sameContent(saved,original) || isHistoricalEcho(saved,relativeTo:original) else{break}
+                    try await Task.sleep(nanoseconds:delay)
+                    saved=try await backend.read(original.id)
+                }
                 guard let savedDocument=saved.document,savedDocument.equivalent(to:submittedDocument) else {
-                    hasConflict=true
+                    if sameContent(saved,original) || isHistoricalEcho(saved,relativeTo:original) {
+                        throw NSError(domain:"NotesPlus",code:425,userInfo:[NSLocalizedDescriptionKey:"기본 메모의 저장 확인을 기다리고 있습니다. 작성 내용은 그대로 보관됩니다."])
+                    }
+                    hasConflict=true; conflictSnapshot=saved
                     throw NSError(domain:"NotesPlus",code:422,userInfo:[NSLocalizedDescriptionKey:"저장 후 원본이 예상과 다릅니다. 로컬 초안을 보관했습니다."])
                 }
                 guard selectedNoteID==original.id else { return false }
+                try await remember(original,saved)
                 // Use the canonical HTML as the next comparison base without replacing newer
                 // keystrokes, the caret, marked text or the text view's undo history.
                 newNoteProfiles[original.id]=nil
@@ -277,7 +311,7 @@ struct LocalDraft: Codable, Sendable { let id: String; let originalHTML: String;
                 persistDraft()
                 if !wantsFlush {break}
             } catch {
-                if (error as NSError).code==409 { hasConflict=true }
+                if (error as NSError).code==409 { hasConflict=true; conflictSnapshot=try? await backend.read(original.id) }
                 fail(error); persistDraft()
                 if !hasConflict, retryCount<3 {
                     retryCount += 1
@@ -292,31 +326,58 @@ struct LocalDraft: Codable, Sendable { let id: String; let originalHTML: String;
         ((a.document != nil && b.document != nil) ? a.document!.equivalent(to:b.document!) : NoteCodec.normalized(a.text)==NoteCodec.normalized(b.text)) &&
             a.profile.reason==b.profile.reason && a.profile.titleTemplate==b.profile.titleTemplate
     }
-    private func writePreservingCanonicalChanges(_ original:NoteSnapshot,html:String) async throws -> NoteSnapshot {
+    private func writePreservingCanonicalChanges(_ original:NoteSnapshot,html:String,document:NoteDocument) async throws -> NoteSnapshot {
         do { return try await backend.write(original.id,expectedHTML:original.html,html:html) }
         catch {
             guard (error as NSError).code==409 else { throw error }
             let fresh=try await backend.read(original.id)
-            guard sameContent(original,fresh), fresh.profile.editable else { throw error }
+            if fresh.profile.editable,fresh.document?.equivalent(to:document)==true {return fresh}
+            guard (sameContent(original,fresh) || isHistoricalEcho(fresh,relativeTo:original)), fresh.profile.editable else { throw error }
             // Retry once only when Notes changed its serialization, not the note's content.
             return try await backend.write(original.id,expectedHTML:fresh.html,html:html)
         }
+    }
+    private func isHistoricalEcho(_ fresh:NoteSnapshot,relativeTo current:NoteSnapshot)->Bool {
+        fresh.id==current.id && fresh.modified<current.modified && fresh.profile.editable && histories[current.id]?.contains(fresh)==true
+    }
+    private func remember(_ before:NoteSnapshot,_ after:NoteSnapshot) async throws {
+        var history=histories[after.id] ?? SyncHistory(id:after.id)
+        history.remember(before); history.remember(after)
+        // Publish before suspending: a second caller must extend this history, never
+        // overwrite newer entries with a value captured before the disk write.
+        histories[after.id]=history
+        try await draftWriter.history(history,to:historyURL(after.id))
+    }
+    private func historyURL(_ id:String)->URL {
+        draftURL(id).deletingLastPathComponent().appendingPathComponent(draftURL(id).lastPathComponent.replacingOccurrences(of:"draft-",with:"history-"))
     }
     private func draftURL(_ id:String)->URL {
         let name=SHA256.hash(data:Data(id.utf8)).map { String(format:"%02x",$0) }.joined()
         return support.appendingPathComponent("draft-\(name).json")
     }
     private func currentDocument()->NoteDocument {
-        if editorBridge.noteID==selectedNoteID,let capture=editorBridge.capture {return capture()}
+        if editorBridge.noteID==selectedNoteID,editorBridge.loadVersion==editorLoadVersion,let capture=editorBridge.capture {
+            let document=capture()
+            if NoteCodec.normalized(document.text)==NoteCodec.normalized(text) {return document}
+        }
         if let document=editorDocument,document.text==text {return document}
         return NoteDocument(text:text)
     }
     func persistDraft() {
         guard let s=snapshot else{return}
-        let draft:LocalDraft? = dirty || newNoteProfiles[s.id] != nil ? LocalDraft(id:s.id,originalHTML:s.html,text:text,modified:Date(),pendingTitleTemplate:newNoteProfiles[s.id]?.titleTemplate,document:currentDocument()) : nil
+        let draft:LocalDraft? = dirty || newNoteProfiles[s.id] != nil ? LocalDraft(id:s.id,originalHTML:s.html,text:text,modified:Date(),pendingTitleTemplate:newNoteProfiles[s.id]?.titleTemplate,document:currentDocument(),baseDocument:s.document) : nil
         draftWriter.submit(draft,to:draftURL(s.id)) { [weak self] error in
             Task { @MainActor in self?.errorMessage="로컬 초안을 저장하지 못했습니다: \(error.localizedDescription)" }
         }
+    }
+    func preserveUnsavedDraft() async throws {
+        while dirty,let s=snapshot {
+            let version=editVersion
+            let draft=LocalDraft(id:s.id,originalHTML:s.html,text:text,modified:Date(),pendingTitleTemplate:newNoteProfiles[s.id]?.titleTemplate,document:currentDocument(),baseDocument:s.document)
+            try await draftWriter.backup(draft,to:draftURL(s.id))
+            if selectedNoteID==s.id,editVersion==version {return}
+        }
+        await draftWriter.barrier()
     }
     private func backup(_ note:NoteSnapshot) async throws {
         if let date=backupDates[note.id],Date().timeIntervalSince(date)<300 {return}
@@ -352,26 +413,53 @@ struct LocalDraft: Codable, Sendable { let id: String; let originalHTML: String;
     }
     func openOriginal() async {
         guard let id=selectedNoteID else { return }
-        _ = await flush()
+        guard await flush() else{return}
         do { try await backend.show(id) } catch { fail(error) }
     }
-    func reloadOriginal() async {
-        guard let id=selectedNoteID, !busy, !saving else { return }
-        persistDraft(); autosaveTask?.cancel()
-        let alert=NSAlert(); alert.messageText="기본 메모의 현재 내용을 불러올까요?"
-        alert.informativeText="현재 초안을 따로 보관한 뒤 원본을 불러옵니다."
-        alert.addButton(withTitle:"불러오기"); alert.addButton(withTitle:"취소")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        busy=true
+    func reviewConflict() async -> NoteSnapshot? {
+        guard let id=selectedNoteID,!saving else{return nil}
         do {
-            await draftWriter.barrier()
             let fresh=try await backend.read(id)
-            let draft=draftURL(id)
-            if FileManager.default.fileExists(atPath:draft.path) {
-                try FileManager.default.moveItem(at:draft,to:support.appendingPathComponent("recovered-\(UUID().uuidString).json"))
+            guard selectedNoteID==id,hasConflict else{return nil}
+            conflictSnapshot=fresh; return fresh
+        } catch {fail(error); return nil}
+    }
+    @discardableResult func resolveConflict(usingLocal:Bool,reviewed:NoteSnapshot) async -> Bool {
+        guard selectedNoteID==reviewed.id,hasConflict,!busy,!saving,!switching,!composing else{return false}
+        busy=true; defer{busy=false}
+        autosaveTask?.cancel(); autosaveTask=nil; draftWork?.cancel(); draftWork=nil
+        persistDraft()
+        do {
+            let fresh=try await backend.read(reviewed.id)
+            // The choice applies only to the version the user actually reviewed.
+            guard fresh.html==reviewed.html,fresh.profile.reason==reviewed.profile.reason else {
+                conflictSnapshot=fresh
+                errorMessage="확인하는 동안 기본 메모가 다시 변경되었습니다. 두 버전을 다시 확인해 주세요."
+                return false
             }
-            newNoteProfiles[id]=nil; install(fresh,restoreDraft:false); busy=false
-        } catch { fail(error); busy=false }
+            let directory=support.appendingPathComponent("Recovered",isDirectory:true).appendingPathComponent(UUID().uuidString,isDirectory:true)
+            let local=LocalDraft(id:fresh.id,originalHTML:snapshot?.html ?? "",text:text,modified:Date(),pendingTitleTemplate:newNoteProfiles[fresh.id]?.titleTemplate,document:currentDocument(),baseDocument:snapshot?.document)
+            try await draftWriter.backup(local,to:directory.appendingPathComponent("NotesPlus.json"))
+            try await draftWriter.backup(LocalDraft(id:fresh.id,originalHTML:fresh.html,text:fresh.text,modified:fresh.modified,document:fresh.document),to:directory.appendingPathComponent("AppleNotes.json"))
+            if usingLocal {
+                guard fresh.profile.editable else {
+                    errorMessage="기본 메모에 보호가 필요한 서식이 추가되었습니다. 두 버전을 보관했으며 원본은 변경하지 않았습니다."
+                    return false
+                }
+                snapshot=fresh; revision &+= 1; hasConflict=false; conflictSnapshot=nil; errorMessage=nil
+                if !dirty {editVersion &+= 1; unsavedSince=Date()}
+                busy=false
+                return await flush()
+            }
+            // Only remove the active draft after both versions are durably archived.
+            var chosenHistory=SyncHistory(id:fresh.id); chosenHistory.remember(fresh)
+            try await draftWriter.history(chosenHistory,to:historyURL(fresh.id))
+            try await draftWriter.remove(draftURL(fresh.id))
+            histories[fresh.id]=chosenHistory
+            newNoteProfiles[fresh.id]=nil; install(fresh,restoreDraft:false)
+            status="선택한 버전을 불러왔습니다. 이전 작성본도 보관되어 있습니다."
+            return true
+        } catch {fail(error); persistDraft(); return false}
     }
     func checkForExternalChanges() async {
         guard connected, !busy, !saving, !switching, !polling else { return }
@@ -388,8 +476,23 @@ struct LocalDraft: Codable, Sendable { let id: String; let originalHTML: String;
                         var baseline=fresh; baseline.text=old.text; baseline.document=old.document; snapshot=baseline; revision &+= 1
                         if dirty { persistDraft() }
                     }
-                    else if dirty { hasConflict=true; autosaveTask?.cancel(); status="다른 기기에서 원본이 변경되었습니다."; persistDraft() }
-                    else { install(fresh,restoreDraft:false) }
+                    else if isHistoricalEcho(fresh,relativeTo:old) {
+                        // The known old revision has an older modification date. Keep the editor
+                        // and re-send the latest draft against that exact server baseline.
+                        snapshot=fresh; revision &+= 1
+                        if !dirty {editVersion &+= 1; unsavedSince=Date()}
+                        persistDraft(); scheduleAutosave()
+                    }
+                    else if dirty || composing {
+                        hasConflict=true; conflictSnapshot=fresh; autosaveTask?.cancel()
+                        status="다른 버전이 있습니다. 현재 작성 내용은 유지됩니다."; persistDraft()
+                    }
+                    else {
+                        // Keep the last accepted version on disk before applying a remote edit.
+                        try await remember(old,fresh)
+                        guard token==revision,!dirty,!composing,!saving,selectedNoteID==old.id else{return}
+                        install(fresh,restoreDraft:false)
+                    }
                 }
             }
             if Date().timeIntervalSince(lastListRefresh)>=settings.syncInterval,let id=selectedFolderID {

@@ -30,6 +30,13 @@ import AppKit
             let saved=await model.flush()
             if saved { sender.reply(toApplicationShouldTerminate:true) }
             else {
+                do {try await model.preserveUnsavedDraft()}
+                catch {
+                    let alert=NSAlert(); alert.messageText="초안을 저장하지 못해 종료하지 않았습니다."
+                    alert.informativeText=error.localizedDescription
+                    alert.addButton(withTitle:"계속 사용"); alert.runModal()
+                    finishing=false; sender.reply(toApplicationShouldTerminate:false); return
+                }
                 let alert=NSAlert(); alert.messageText="동기화하지 못한 변경 사항이 있습니다."
                 alert.informativeText="로컬 초안은 보관되어 있으며 다음 실행 때 복원됩니다."
                 alert.addButton(withTitle:"계속 사용"); alert.addButton(withTitle:"초안을 보관하고 종료")
@@ -45,16 +52,20 @@ import AppKit
 @main struct NotesPlusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var model=NotesModel()
+    @StateObject private var updater=AppUpdater()
     var body: some Scene {
         Window("NotesPlus",id:"main") {
             MainView(model:model)
-                .onAppear { delegate.model=model }
+                .onAppear { delegate.model=model; updater.start() }
                 .task { if UserDefaults.standard.bool(forKey:"hasConnected"), !model.connected { await model.connect() } }
                 .frame(minWidth:860,minHeight:560)
                 .tint(Color(red:0,green:122.0/255,blue:1))
         }
         .defaultSize(width:1080,height:740)
         .commands {
+            CommandGroup(after:.appInfo) {
+                Button("업데이트 확인…") {updater.check()}.disabled(!updater.canCheck)
+            }
             CommandGroup(replacing:.newItem) {
                 Button("새로운 메모") { Task { await model.newNote() } }.keyboardShortcut("n").disabled(!model.connected || model.busy)
             }
@@ -66,7 +77,7 @@ import AppKit
                 Button("다시 동기화") { Task { _ = await model.flush(); await model.refreshList() } }.keyboardShortcut("r").disabled(!model.connected)
             }
         }
-        Settings { SettingsView(settings:model.settings,model:model) }
+        Settings { SettingsView(settings:model.settings,model:model,updater:updater) }
     }
 }
 
@@ -87,6 +98,7 @@ struct NoteGroup: Identifiable { let id:String; var notes:[NoteSummary] }
 struct MainView: View {
     @ObservedObject var model:NotesModel
     @State private var visibility=NavigationSplitViewVisibility.all
+    @State private var reviewingConflict=false
     @ObservedObject var settings:EditorSettings
     init(model:NotesModel) {self.model=model; self.settings=model.settings}
     var accounts:[String] { Array(Set(model.folders.map(\.account))).sorted { a,b in a.lowercased().contains("icloud") ? true : (b.lowercased().contains("icloud") ? false : a<b) } }
@@ -206,6 +218,7 @@ struct MainView: View {
             }
         }
         .preferredColorScheme(settings.colorScheme)
+        .sheet(isPresented:$reviewingConflict) { ConflictReview(model:model) }
         .overlay { if model.busy { ProgressView().controlSize(.small).padding(14).background(.regularMaterial,in:RoundedRectangle(cornerRadius:12)) } }
     }
     private func noteRow(_ note:NoteSummary)->some View {
@@ -224,8 +237,8 @@ struct MainView: View {
             VStack(spacing:0) {
                 if model.hasConflict {
                     HStack {
-                        Text("다른 기기에서 변경된 내용이 있습니다. 초안을 보관했습니다.")
-                        Spacer(); Button("원본 불러오기") { Task { await model.reloadOriginal() } }
+                        Text("기본 메모와 다른 버전이 있습니다. 작성 중인 내용은 그대로 유지됩니다.")
+                        Spacer(); Button("두 버전 확인") { reviewingConflict=true }
                     }.font(.system(size:12)).padding(12).background(Color.orange.opacity(0.12))
                 }
                 if let reason=note.profile.reason {
@@ -240,5 +253,56 @@ struct MainView: View {
                 }
             }.background(Color(nsColor:.textBackgroundColor))
         } else { Text("메모 없음").foregroundStyle(.secondary).frame(maxWidth:.infinity,maxHeight:.infinity) }
+    }
+}
+
+struct ConflictReview:View {
+    @ObservedObject var model:NotesModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var reviewed:NoteSnapshot?
+    @State private var working=false
+    @State private var localText=""
+    var body:some View {
+        VStack(alignment:.leading,spacing:16) {
+            Text("저장할 버전 선택").font(.title2.weight(.semibold))
+            Text("양쪽 내용을 확인한 뒤 선택하세요. 선택 전 두 버전을 모두 Mac에 보관합니다.").foregroundStyle(.secondary)
+            HStack(alignment:.top,spacing:16) {
+                version("NotesPlus 작성본",text:localText,date:nil)
+                version("기본 메모의 현재 버전",text:reviewed?.document?.text ?? reviewed?.text ?? "불러오는 중…",date:reviewed?.modified)
+            }
+            if let error=model.errorMessage {Text(error).font(.callout).foregroundStyle(.orange)}
+            HStack {
+                Button("보관 폴더 열기") {model.openSupportFolder()}
+                Spacer()
+                Button("계속 편집") {dismiss()}.keyboardShortcut(.cancelAction)
+                Button("기본 메모 버전 사용") {resolve(local:false)}.disabled(reviewed==nil || working)
+                Button("NotesPlus 작성본 저장") {resolve(local:true)}.buttonStyle(.borderedProminent).disabled(reviewed?.profile.editable != true || working)
+            }
+        }
+        .padding(24).frame(width:840,height:550)
+        .task {await refresh()}
+    }
+    private func version(_ title:String,text:String,date:Date?)->some View {
+        VStack(alignment:.leading,spacing:8) {
+            Text(title).font(.headline)
+            if let date {Text(date,format:.dateTime.year().month().day().hour().minute().second()).font(.caption).foregroundStyle(.secondary)}
+            else {Text("현재 작성 중 · \(text.count)자").font(.caption).foregroundStyle(.secondary)}
+            ScrollView {Text(text.isEmpty ? "(빈 메모)" : text).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.topLeading).padding(12)}
+                .frame(maxWidth:.infinity,maxHeight:.infinity)
+                .background(Color(nsColor:.textBackgroundColor),in:RoundedRectangle(cornerRadius:8))
+                .overlay(RoundedRectangle(cornerRadius:8).stroke(.quaternary))
+        }.frame(maxWidth:.infinity)
+    }
+    private func refresh() async {
+        working=true; localText=model.text; reviewed=await model.reviewConflict(); working=false
+    }
+    private func resolve(local:Bool) {
+        guard let reviewed else{return}
+        working=true
+        Task {
+            if await model.resolveConflict(usingLocal:local,reviewed:reviewed) {dismiss()}
+            else {await refresh()}
+            working=false
+        }
     }
 }

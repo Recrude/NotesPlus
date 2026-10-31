@@ -7,6 +7,10 @@ actor FakeNotes: NotesBackend {
     var writeCount=0
     var createdFolder:String?
     var failures=0
+    var delayedReadbacks=0
+    var pendingReadbacks:[NoteSnapshot]=[]
+    var failAfterWrite=false
+    var showCount=0
     var holdWrites=false
     var writeGate:CheckedContinuation<Void,Never>?
     var writeWaiters:[(Int,CheckedContinuation<Void,Never>)]=[]
@@ -23,7 +27,7 @@ actor FakeNotes: NotesBackend {
     func folders() async throws->[NoteFolder] { [NoteFolder(["id":"f1","name":"Notes","account":"iCloud","count":2])] }
     func notes(in folder:String) async throws->[NoteSummary] { values.values.map { NoteSummary(["id":$0.id,"name":$0.name,"modified":$0.modified]) } }
     func read(_ id:String) async throws->NoteSnapshot {
-        let value=values[id]!
+        let value=pendingReadbacks.isEmpty ? values[id]! : pendingReadbacks.removeFirst()
         if holdRead {
             holdRead=false; readStarted=true; readWaiter?.resume(); readWaiter=nil
             await withCheckedContinuation { readGate=$0 }
@@ -35,17 +39,23 @@ actor FakeNotes: NotesBackend {
         // Simulate Notes dropping an empty heading during canonicalization.
         let note=Self.note("n3",""); values[note.id]=note; return note
     }
-    func show(_ id:String) async throws { }
+    func show(_ id:String) async throws { showCount += 1 }
     func write(_ id:String,expectedHTML:String,html:String) async throws->NoteSnapshot {
         writeCount += 1
         let ready=writeWaiters.filter{$0.0<=writeCount}; writeWaiters.removeAll{$0.0<=writeCount}; ready.forEach{$0.1.resume()}
         if holdWrites { await withCheckedContinuation { writeGate=$0 } }
         if failures>0 { failures -= 1; throw NSError(domain:"Test",code:503,userInfo:[NSLocalizedDescriptionKey:"Temporary connection failure"]) }
         guard values[id]?.html==expectedHTML else { throw NSError(domain:"Test",code:409,userInfo:[NSLocalizedDescriptionKey:"Changed remotely"]) }
+        let previous=values[id]!
         let doc=try XMLDocument(xmlString:html,options:[.documentTidyHTML,.nodeLoadExternalEntitiesNever])
         let plain=try doc.nodes(forXPath:"//body/div | //body/p | //body/ol/li").map{NoteCodec.normalized($0.stringValue ?? "")}.joined(separator:"\n")+"\n"
         let result=NoteSnapshot(["id":id,"name":plain.components(separatedBy:"\n").first ?? "","plain":plain,"html":html,"modified":Date()])
-        values[id]=result; return result
+        values[id]=result
+        if failAfterWrite {failAfterWrite=false; throw NSError(domain:"Test",code:425,userInfo:[NSLocalizedDescriptionKey:"Readback is still settling"])}
+        if delayedReadbacks>0 {
+            pendingReadbacks=Array(repeating:previous,count:delayedReadbacks-1); delayedReadbacks=0; return previous
+        }
+        return result
     }
     func waitForWrites(_ count:Int) async {
         if writeCount>=count { return }
@@ -55,6 +65,9 @@ actor FakeNotes: NotesBackend {
     func blockWrites() { holdWrites=true }
     func releaseWrites() { holdWrites=false; writeGate?.resume(); writeGate=nil }
     func failOnce() { failures=1 }
+    func delayReadback(_ count:Int) {delayedReadbacks=count}
+    func failOnceAfterApplying() {failAfterWrite=true}
+    func restore(_ note:NoteSnapshot) {values[note.id]=note}
     func externalEdit(_ text:String) { values["n1"]=Self.note("n1",text) }
     func canonicalizeHTML() {
         let old=values["n1"]!
@@ -217,7 +230,7 @@ actor FakeNotes: NotesBackend {
             let (m,b,_)=await make()
             let version=m.editorLoadVersion
             let doc=NoteDocument(paragraphs:[NoteParagraph(text:"첫 메모"),NoteParagraph(text:"본문",lists:[NoteList(id:1,kind:"decimal")])])
-            m.editorBridge.noteID="n1"; m.editorBridge.capture={doc}
+            m.editorBridge.noteID="n1"; m.editorBridge.loadVersion=m.editorLoadVersion; m.editorBridge.capture={doc}
             m.edited(m.text)
             check(m.dirty,"format-only list conversion marks the note dirty")
             let okay=await m.flush(); let saved=try await b.read("n1")
@@ -250,6 +263,146 @@ actor FakeNotes: NotesBackend {
             let quitOK=await quitFlush.value; let navigationOK=await navigationFlush.value
             check(quitOK && navigationOK && !m.dirty,"simultaneous quit/navigation flushes drain the active automatic writer")
             check(NoteCodec.normalized(try await b.read("n1").text)=="final batch before quit","concurrent flush completion never drops the final edit")
+        } catch {fatalError("\(error)")}
+        do {
+            let (m,b,_)=await make()
+            await b.delayReadback(2); m.edited("저장 확인이 늦어져도 전체 본문 유지")
+            let okay=await m.flush()
+            check(okay && !m.hasConflict && !m.dirty,"delayed own-write readback is confirmed without a false conflict")
+            check(await b.writeCount==1,"waiting for readback never resubmits the body")
+        }
+        do {
+            let (m,b,_)=await make()
+            await b.failOnceAfterApplying(); m.edited("실제로 반영되었지만 응답이 지연된 본문")
+            check(!(await m.flush()) && m.dirty,"uncertain write acknowledgement retains the draft")
+            await m.retry()
+            check(!m.hasConflict && !m.dirty,"retry recognizes that the requested document already reached Notes")
+        }
+        do {
+            let (m,b,_)=await make()
+            let first=try await b.read("n1")
+            m.edited("첫 저장\n추가 문장"); _ = await m.flush()
+            m.edited("첫 저장\n추가 문장\n작성 중인 마지막 문장")
+            let load=m.editorLoadVersion
+            await b.restore(first); await m.checkForExternalChanges()
+            check(!m.hasConflict && m.text.hasSuffix("작성 중인 마지막 문장") && m.editorLoadVersion==load,"an exact older saved revision never replaces active typing")
+            check(await m.flush(),"latest typing safely rebases on the exact known historical revision")
+            let latest=try await b.read("n1")
+            await b.restore(first); await m.checkForExternalChanges()
+            check(m.text.hasSuffix("작성 중인 마지막 문장") && m.dirty && !m.hasConflict,"an older echo after a clean save keeps the acknowledged latest document")
+            _ = await m.flush()
+            check(try await b.read("n1").document!.equivalent(to:latest.document!),"the latest complete document is restored after an old echo")
+            m.edited("새로 작성 중")
+            await b.externalEdit(first.text); await m.checkForExternalChanges()
+            check(m.hasConflict && m.text=="새로 작성 중","an intentional revert with a new timestamp is still treated as a real external edit")
+        } catch {fatalError("\(error)")}
+        do {
+            let (m,b,_)=await make()
+            let partial=NoteDocument(text:"일부 본문")
+            m.editorBridge.noteID="n1"; m.editorBridge.loadVersion=m.editorLoadVersion
+            m.editorBridge.capture={partial}; m.edited("전체 본문\n마지막 줄까지 유지")
+            _ = await m.flush()
+            check(NoteCodec.normalized(try await b.read("n1").text)==m.text,"a stale editor capture cannot replace newer model text with a partial body")
+            let numbered=NoteDocument(paragraphs:[NoteParagraph(text:"동일한 글",lists:[NoteList(id:1,kind:"decimal")])])
+            m.editorBridge.loadVersion=m.editorLoadVersion &- 1; m.editorBridge.capture={numbered}; m.edited("동일한 글")
+            _ = await m.flush()
+            check(try await b.read("n1").document?.hasLists==false,"a previous editor installation cannot leak its formatting into the active note")
+        } catch {fatalError("\(error)")}
+        do {
+            let (m,b,url)=await make()
+            let old=try await b.read("n1")
+            m.edited("재실행 후에도 유지할 전체 작성본"); _ = await m.flush()
+            await b.restore(old)
+            let restarted=NotesModel(backend:b,supportURL:url,startTimer:false,debounceNanoseconds:60_000_000_000)
+            await restarted.connect(); await restarted.chooseNote("n1")
+            check(restarted.text==m.text && restarted.dirty && !restarted.hasConflict,"durable revision history protects an acknowledged edit across relaunch")
+            _ = await restarted.flush()
+        } catch {fatalError("\(error)")}
+        do {
+            let (m,b,url)=await make()
+            m.edited("복구할 로컬 초안"); m.persistDraft()
+            await b.failOnce(); _ = await m.flush()
+            await b.canonicalizeHTML()
+            let restarted=NotesModel(backend:b,supportURL:url,startTimer:false,debounceNanoseconds:60_000_000_000)
+            await restarted.connect(); await restarted.chooseNote("n1")
+            check(restarted.text=="복구할 로컬 초안" && restarted.dirty && !restarted.hasConflict,"draft recovery tolerates canonical HTML changes to the original base")
+            _ = await restarted.flush()
+        }
+        do {
+            let (m,b,url)=await make()
+            m.edited("서식을 바꿀 본문"); _ = await m.flush()
+            let doc=NoteDocument(paragraphs:[NoteParagraph(text:m.text,lists:[NoteList(id:1,kind:"decimal")])])
+            m.editorBridge.noteID="n1"; m.editorBridge.loadVersion=m.editorLoadVersion; m.editorBridge.capture={doc}
+            m.edited(m.text); m.persistDraft(); await b.failOnce(); _ = await m.flush()
+            let restarted=NotesModel(backend:b,supportURL:url,startTimer:false,debounceNanoseconds:60_000_000_000)
+            await restarted.connect(); await restarted.chooseNote("n1")
+            check(restarted.dirty && restarted.editorDocument?.hasLists==true,"format-only drafts survive relaunch even when their text matches the remote note")
+            _ = await restarted.flush()
+        }
+        do {
+            let (m,b,url)=await make()
+            m.edited("현재 Mac에서 작성한 전체 문장"); await b.externalEdit("iPhone에서 수정한 문장")
+            await m.checkForExternalChanges()
+            let reviewed=await m.reviewConflict()
+            check(reviewed?.text=="iPhone에서 수정한 문장" && m.text=="현재 Mac에서 작성한 전체 문장","conflict review exposes both versions without replacing the local editor")
+            await m.openOriginal()
+            check(await b.showCount==0,"opening Apple Notes cannot silently display an older version while local saving is blocked")
+            await b.externalEdit("확인하는 동안 다시 변경됨")
+            check(!(await m.resolveConflict(usingLocal:true,reviewed:reviewed!)) && m.hasConflict,"resolution refuses to overwrite a remote edit made after review")
+            let latest=await m.reviewConflict()
+            check(await m.resolveConflict(usingLocal:true,reviewed:latest!),"explicitly choosing the local version saves through normal conflict-checked autosave")
+            check(NoteCodec.normalized(try await b.read("n1").text)=="현재 Mac에서 작성한 전체 문장","local resolution stores the complete current document")
+            let recovered=try FileManager.default.contentsOfDirectory(at:url.appendingPathComponent("Recovered"),includingPropertiesForKeys:nil)
+            let files=try FileManager.default.contentsOfDirectory(atPath:recovered[0].path)
+            check(files.contains("NotesPlus.json") && files.contains("AppleNotes.json"),"both reviewed versions are durably archived before conflict resolution")
+            m.edited("두 번째 로컬 초안"); await b.externalEdit("선택할 기기 버전"); await m.checkForExternalChanges()
+            let remote=await m.reviewConflict()
+            check(await m.resolveConflict(usingLocal:false,reviewed:remote!),"the user can choose the reviewed remote version")
+            check(m.text=="선택할 기기 버전" && !m.dirty && !m.hasConflict,"remote resolution installs only the reviewed document and clears the active draft")
+        } catch {fatalError("\(error)")}
+        do {
+            let (m,b,url)=await make()
+            let old=try await b.read("n1")
+            m.edited("최근 저장본"); _ = await m.flush()
+            m.edited("아직 동기화하지 못한 최신 초안"); await b.failOnce(); _ = await m.flush()
+            await b.restore(old)
+            let restarted=NotesModel(backend:b,supportURL:url,startTimer:false,debounceNanoseconds:60_000_000_000)
+            await restarted.connect(); await restarted.chooseNote("n1")
+            let reviewed=await restarted.reviewConflict()
+            check(reviewed != nil && restarted.hasConflict,"a recovered draft conflicting with an older remote version remains reviewable")
+            check(await restarted.resolveConflict(usingLocal:false,reviewed:reviewed!),"the user can explicitly keep an older remote version")
+            let again=NotesModel(backend:b,supportURL:url,startTimer:false,debounceNanoseconds:60_000_000_000)
+            await again.connect(); await again.chooseNote("n1")
+            check(again.text==old.document?.text && !again.dirty,"relaunch honors an explicit remote choice instead of resurrecting archived local history")
+        } catch {fatalError("\(error)")}
+        do {
+            let (m,b,url)=await make()
+            let full="부분 저장 복구\n전체 문장\n마지막 줄까지 남아 있어야 합니다"
+            m.edited(full); await b.failOnce(); _ = await m.flush()
+            let file=try FileManager.default.contentsOfDirectory(at:url,includingPropertiesForKeys:nil).first{$0.lastPathComponent.hasPrefix("draft-")}!
+            var legacy=try JSONDecoder().decode(LocalDraft.self,from:Data(contentsOf:file))
+            legacy.document=NoteDocument(text:"부분 저장 복구")
+            legacy.baseDocument=nil
+            try JSONEncoder().encode(legacy).write(to:file,options:.atomic)
+            let restarted=NotesModel(backend:b,supportURL:url,startTimer:false,debounceNanoseconds:60_000_000_000)
+            await restarted.connect(); await restarted.chooseNote("n1")
+            check(restarted.text==full && restarted.editorDocument?.text==full,"legacy partial rich-text captures never hide the complete saved draft after upgrade")
+            _ = await restarted.flush()
+            check(NoteCodec.normalized(try await b.read("n1").text)==full,"upgraded legacy drafts save the complete recovered body")
+        } catch {fatalError("\(error)")}
+        do {
+            let (m,b,url)=await make()
+            m.edited("업데이트 종료 전 반드시 보관할 초안"); await b.failOnce(); _ = await m.flush()
+            let file=try FileManager.default.contentsOfDirectory(at:url,includingPropertiesForKeys:nil).first{$0.lastPathComponent.hasPrefix("draft-")}!
+            try FileManager.default.removeItem(at:file)
+            try FileManager.default.createDirectory(at:file,withIntermediateDirectories:false)
+            var failed=false
+            do {try await m.preserveUnsavedDraft()} catch {failed=true}
+            check(failed && m.dirty,"a local draft write failure prevents claiming a safe update shutdown")
+            try FileManager.default.removeItem(at:file)
+            try await m.preserveUnsavedDraft()
+            let restored=try JSONDecoder().decode(LocalDraft.self,from:Data(contentsOf:file))
+            check(restored.text==m.text,"update shutdown waits for the complete draft to reach disk")
         } catch {fatalError("\(error)")}
         for url in directories { try? FileManager.default.removeItem(at:url) }
         print("\(checks) autosave checks passed.")

@@ -56,7 +56,6 @@ struct NoteEditor:NSViewRepresentable {
     }
     func updateNSView(_ scroll:NSScrollView,context:Context) {
         let c=context.coordinator; c.parent=self
-        bridge?.noteID=noteID
         guard let view=scroll.documentView as? NSTextView else{return}
         (view as? PlainNoteTextView)?.editorSettings=settings
         view.isEditable=editable; view.isSelectable=true
@@ -69,6 +68,7 @@ struct NoteEditor:NSViewRepresentable {
             c.updating=false; view.undoManager?.removeAllActions()
             if changedNote {view.scrollToBeginningOfDocument(nil)}
             c.noteID=noteID; c.loadedVersion=loadVersion; c.applyStyle(force:true)
+            bridge?.noteID=noteID; bridge?.loadVersion=loadVersion
         }
         c.applyInputSettings(); c.applyStyle()
         if c.focusToken != focusToken,editable {

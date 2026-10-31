@@ -63,8 +63,9 @@ archive,disk_image,version,identity,profile=sys.argv[1:]
 with zipfile.ZipFile(archive) as z:
     assert z.testzip() is None
     actual={n for n in z.namelist() if not n.endswith('/') and not n.startswith('__MACOSX/')}
-    allowed={'NotesPlus.app/Contents/'+n for n in ['MacOS/NotesPlus','Info.plist','Resources/AppIcon.icns','_CodeSignature/CodeResources']}
-    assert actual<=allowed, 'Unexpected files in application archive: '+str(actual-allowed)
+    allowed={'NotesPlus.app/Contents/'+n for n in ['MacOS/NotesPlus','Info.plist','Resources/AppIcon.icns','Resources/Sparkle-LICENSE.txt','_CodeSignature/CodeResources']}
+    unexpected={n for n in actual-allowed if not n.startswith('NotesPlus.app/Contents/Frameworks/Sparkle.framework/')}
+    assert not unexpected, 'Unexpected files in application archive: '+str(unexpected)
 artifacts=[pathlib.Path(archive),pathlib.Path(disk_image)]
 checksums={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in artifacts}
 out=artifacts[0].parent

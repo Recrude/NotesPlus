@@ -1,7 +1,7 @@
-NotesPlus 0.6.0 GitHub DMG 배포
+NotesPlus 0.7.0 GitHub DMG 배포
 
 현재 상태
-- 기능 및 회귀 검사 107개 통과.
+- 기능 및 회귀 검사 141개 통과.
 - 실제 앱에서 기본/변경 단축키, 두 날짜 형식, 실행 취소/다시 실행, 기본 메모 자동 저장 확인.
 - Apple Silicon / macOS 26.0 최소 버전으로 빌드.
 - ZIP, Applications 바로가기를 포함한 DMG, SHA-256 체크섬 및 배포 상태 JSON 제공.
@@ -9,7 +9,7 @@ NotesPlus 0.6.0 GitHub DMG 배포
 - 이번 배포는 사용자 선택에 따라 Developer ID 인증서와 Apple 공증 없이 진행.
 - 현재 패키지는 ad-hoc 서명된 Pre-release. 보안 경고의 앱별 실행 허용 방법을 설치 안내에 포함.
 - 저장소: https://github.com/Recrude/NotesPlus
-- 릴리스: https://github.com/Recrude/NotesPlus/releases/tag/v0.6.0
+- 릴리스: https://github.com/Recrude/NotesPlus/releases/tag/v0.7.0
 
 재현
 bash build.sh
@@ -34,7 +34,7 @@ GitHub 배포 방식
    공증 승인, 티켓 첨부, Gatekeeper 검사를 통과한 경우에만 최종 패키지를 생성합니다.
 4. 공증된 패키지를 별도 Mac에서 내려받아 첫 실행/자동화 권한/동기화를 확인한 뒤 배포합니다.
 
-배포 상태의 기준은 outputs/NotesPlus-0.6.0-release.json입니다.
+배포 상태의 기준은 outputs/NotesPlus-0.7.0-release.json입니다.
 notarized가 true이면 공증 완료 패키지입니다. 현재는 false이며 release_channel은 prerelease, requires_manual_open은 true입니다.
 인증서·Apple 계정·공증 자격 증명은 현재 제공되지 않았으며 자동으로 생성하거나 결제하지 않았습니다.
 
@@ -42,7 +42,36 @@ Apple 공식 안내
 https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution
 https://developer.apple.com/documentation/security/customizing-the-notarization-workflow
 
+0.7 변경 사항
+설정과 앱 정보의 버전 표시, Sparkle 기반 앱 내 업데이트, GitHub 서명된 소식 제공.
+저장 직후 읽기 지연, 이전 저장본 재등장, 초안 복구와 충돌 비교/선택 보강.
+체크리스트·표 직접 편집은 아직 미지원. 네이티브 전체 기능 구현으로 배포하지 않음.
+
 0.6 변경 사항
 타임스탬프: 기본 ⌘⌃T, 날짜 형식과 단축키를 설정에서 변경. 현재 Mac의 시간대, Gregorian 날짜, 24시간 형식.
 정렬: 새 설치 및 기존 수정일 기본 설정을 생성일 기준으로 전환. 이후 사용자가 정렬을 바꾸면 그 선택을 유지.
 이전 버전의 번호 목록, 연속 자동 저장, 행간 및 입력 설정을 유지.
+
+
+앱 내 업데이트 배포
+1. Resources/Info.plist의 CFBundleShortVersionString과 CFBundleVersion을 함께 올립니다. 빌드 번호는 반드시 증가해야 합니다.
+2. Release/<version>.html에 앱에서 보여 줄 변경 내용을 작성합니다.
+3. bash build.sh 및 bash package.sh로 앱·ZIP·DMG를 만듭니다.
+4. bash Tools/generate-feed.sh로 배포 ZIP과 Release/appcast.xml에 Ed25519 서명을 붙입니다.
+5. GitHub 릴리스의 ZIP·DMG·체크섬을 공개하고, 서명된 appcast.xml을 main에 게시합니다. 게시된 파일을 다시 수정하면 반드시 재서명합니다.
+6. 공개 다운로드 파일의 해시와 서명을 확인하고 앱의 ‘업데이트 확인…’으로 확인합니다.
+
+업데이트 키
+키체인 계정 dev.notesplus.updates에 보관하며, 공개키만 Info.plist의 SUPublicEDKey에 포함합니다.
+이 키는 Apple Developer ID 인증서와 별개이며 비용이 없습니다. 개인키를 저장소, 앱, 릴리스 또는 로그에 포함하지 않습니다.
+키체인을 잃으면 기존 설치본에 업데이트를 배포할 수 없으므로 키체인의 안전한 백업이 필요합니다. 다른 Mac에서 빌드하는 것에는 개인키가 필요 없으며, 업데이트 게시에만 필요합니다.
+
+Sparkle 의존성
+Tools/fetch-sparkle.sh가 공식 Sparkle 2.10.1 배포 파일의 고정된 SHA-256을 확인합니다.
+ad-hoc 서명 앱은 Sparkle을 불러오기 위해 해당 앱의 library validation 예외를 사용합니다. SIP와 Gatekeeper 등 시스템 설정은 변경하지 않습니다. Developer ID 빌드는 이 예외를 사용하지 않습니다.
+다운로드 파일은 압축 해제 전 서명을 검증하며 업데이트 피드도 서명을 검증합니다. 자동 설치는 비활성화되어 있습니다.
+
+업데이트 통합 검증
+bash Tools/build-updater-fixture.sh는 실제 메모와 다른 번들 ID·저장 폴더를 쓰는 테스트 앱 두 버전을 만듭니다.
+출력된 로컬 서버 명령으로 피드를 제공하고 테스트 앱에서 업데이트를 수행합니다. 실제 Apple Notes API를 호출하지 않습니다.
+0.6.9 테스트 앱 → 0.7.0 테스트 앱으로 다운로드, 설치, 종료 취소, 초안 보관 종료, 자동 재실행, 본문과 행간 설정 보존, 최신 버전 감지를 확인했습니다. 변조한 ZIP과 피드의 서명 검증 거부도 확인합니다.

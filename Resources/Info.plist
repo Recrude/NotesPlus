@@ -6,8 +6,17 @@
 <key>CFBundleDisplayName</key><string>NotesPlus</string>
 <key>CFBundleExecutable</key><string>NotesPlus</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.6.0</string>
-<key>CFBundleVersion</key><string>6</string>
+<key>CFBundleShortVersionString</key><string>0.7.0</string>
+<key>CFBundleVersion</key><string>7</string>
+<key>SUFeedURL</key><string>https://raw.githubusercontent.com/Recrude/NotesPlus/main/Release/appcast.xml</string>
+<key>SUPublicEDKey</key><string>jRtMrq29K7l/Ti8/u6yiR/FAJ/Dpi233QSE9SbWOjtg=</string>
+<key>SUEnableAutomaticChecks</key><true/>
+<key>SUScheduledCheckInterval</key><integer>86400</integer>
+<key>SUAutomaticallyUpdate</key><false/>
+<key>SUAllowsAutomaticUpdates</key><false/>
+<key>SUEnableSystemProfiling</key><false/>
+<key>SUVerifyUpdateBeforeExtraction</key><true/>
+<key>SURequireSignedFeed</key><true/>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>NSAppleEventsUsageDescription</key><string>기본 메모의 폴더와 메모를 읽고, 사용자가 저장한 변경 사항을 기본 메모 앱에 반영합니다.</string>

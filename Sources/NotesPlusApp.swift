@@ -5,9 +5,10 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @ObservedObject var settings:EditorSettings
     @ObservedObject var model:NotesModel
+    @ObservedObject var updater:AppUpdater
     @State private var message:String?
     @State private var confirmReset=false
-    private let sections=["기본","서체·여백","목록","입력","시간","화면","저장","Apple 관리"]
+    private let sections=["기본","서체·여백","목록","입력","시간","화면","저장","Apple 관리","업데이트"]
     private var fontNames:[String] { NSFontManager.shared.availableFontFamilies.sorted() }
     var body:some View {
         VStack(spacing:0) {
@@ -39,9 +40,16 @@ struct SettingsView: View {
                         appearance.id("화면")
                         saving.id("저장")
                         appleManaged.id("Apple 관리")
+                        updates.id("업데이트")
                     }.padding(24)
                 }
             }
+            Divider()
+            HStack {
+                Text(updater.version.label).foregroundStyle(.secondary)
+                Spacer()
+                Button("업데이트 확인…") {updater.check()}.disabled(!updater.canCheck)
+            }.font(.callout).padding(.horizontal,24).padding(.vertical,12)
         }
         .frame(width:760,height:760)
         .tint(Color(red:0,green:122.0/255,blue:1))
@@ -96,6 +104,20 @@ struct SettingsView: View {
             }
             note("첫 줄의 제목 서식은 새 메모에 저장됩니다. 기본 위치는 NotesPlus에서 ⌘N으로 만들 때 적용됩니다.")
             Toggle("다크 모드에서 메모 본문도 어둡게 표시",isOn:$settings.values.useDarkBackground)
+        }
+    }
+    private var updates:some View {
+        section("버전 및 업데이트",kind:"NotesPlus") {
+            Text("NotesPlus \(updater.version.version)")
+            Toggle("새 버전 소식 자동 확인",isOn:Binding(get:{updater.automaticChecks},set:{updater.setAutomaticChecks($0)}))
+            if let version=updater.availableVersion {
+                Text("새 버전 \(version)을 사용할 수 있습니다.").foregroundStyle(.blue)
+            }
+            if let date=updater.lastCheck {
+                Text("마지막 확인: \(date.formatted(date:.abbreviated,time:.shortened))").font(.callout).foregroundStyle(.secondary)
+            }
+            if let message=updater.message {note(message)}
+            note("새 버전의 변경 내용을 확인한 뒤 설치할 수 있습니다. 메모·초안·설정을 유지하고 앱을 교체한 뒤 다시 실행합니다.")
         }
     }
     private var typography:some View {

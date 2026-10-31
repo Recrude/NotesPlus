@@ -2,6 +2,7 @@ import AppKit
 
 @MainActor final class EditorBridge {
     var noteID=""
+    var loadVersion:UInt?
     var capture:(()->NoteDocument)?
     func document(noteID:String,fallback:String)->NoteDocument {self.noteID==noteID ? (capture?() ?? NoteDocument(text:fallback)) : NoteDocument(text:fallback)}
 }
