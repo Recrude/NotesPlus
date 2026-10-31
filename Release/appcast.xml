@@ -1,0 +1,38 @@
+<?xml version="1.0" standalone="yes"?><!-- sparkle-sign-warning:
+IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
+--><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>NotesPlus</title>
+        <item>
+            <title>0.7.0</title>
+            <pubDate>Sat, 31 Oct 2026 20:08:30 +0900</pubDate>
+            <link>https://github.com/Recrude/NotesPlus/releases/tag/v0.7.0</link>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>0.7.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h2>NotesPlus 0.7.0</h2>
+<h3>앱 안에서 업데이트</h3>
+<ul>
+<li>설정 하단과 앱 정보에서 현재 버전과 빌드 번호를 확인합니다.</li>
+<li>NotesPlus 메뉴의 ‘업데이트 확인…’에서 새 버전의 변경 내용을 확인하고 설치합니다.</li>
+<li>하루에 한 번 새 버전 소식을 확인하며 설정에서 끌 수 있습니다. 설치는 사용자가 선택한 뒤 진행합니다.</li>
+<li>업데이트 파일과 소식의 서명을 검증한 뒤 앱을 교체합니다. 메모·초안·설정은 유지됩니다.</li>
+</ul>
+<h3>저장과 충돌 처리 개선</h3>
+<ul>
+<li>저장 확인이 늦거나 이전에 저장한 버전이 다시 도착할 때 작성 중인 본문을 유지합니다.</li>
+<li>서식·본문을 읽는 사이 메모가 변경되면 전체 내용을 다시 확인합니다.</li>
+<li>실제 충돌은 ‘두 버전 확인’에서 비교하고 선택합니다. 선택 전에 양쪽 버전을 Mac에 보관합니다.</li>
+<li>최근 저장 기록과 서식만 변경한 초안도 재실행 후 복구합니다.</li>
+</ul>
+<p>체크리스트·표·첨부·복잡한 서식의 직접 편집은 아직 지원하지 않습니다. 이번 버전은 네이티브 기능 전체를 구현한 버전이 아닙니다.</p>
+<p>Developer ID 서명 및 Apple 공증 없이 제공하는 시험 배포입니다.</p>
+]]></description>
+            <enclosure url="https://github.com/Recrude/NotesPlus/releases/download/v0.7.0/NotesPlus-0.7.0-macOS-arm64.zip" length="1955113" type="application/octet-stream" sparkle:edSignature="EUNrfZ/PynCu15K2yrrIKvOr1hivqYG2wk0LfO1jGBN5+TD4UazdJ5W1d2lgCKTKp6Al8CP+uHeYdi9K/dRiAA=="></enclosure>
+        </item>
+    </channel>
+</rss><!-- sparkle-signatures:
+edSignature: MqWNntFRAruJFxtDIMpNgwfKxAW+RmwBVe0AOvanFTiMsY35BFRl9spBfztP6d1WuCshhev+OTgRBl1mcYMTDA==
+length: 2638
+-->
