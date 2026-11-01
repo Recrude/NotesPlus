@@ -21,7 +21,12 @@ On this Mac and the user's paired iPhone, using only the `NotesPlus 실험` fold
    retained both checklist states, the bullet list, all four table cells and
    the trailing body. Restarted NotesPlus and reloaded the same structure.
 4. Typed `1.` followed by space in an empty paragraph and continued with Return.
-   NotesPlus displayed actual numbered paragraphs as 1 and 2.
+   NotesPlus displayed actual numbered paragraphs as 1 and 2. Fixed the save
+   verifier to treat Apple's omitted default start number as 1, restored the
+   complete draft after restart, and verified both numbered paragraphs alongside
+   the checks, bullet, table and full body in Mac Notes. The paired phone was
+   disconnected during this final numbered-list check; the three device checks
+   above had already passed.
 
 The test note is named `NotesPlus 구조 동기화 1101`. Existing personal notes were
 not modified. Phone text input during automation produced isolated Hangul jamo;
