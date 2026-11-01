@@ -16,3 +16,4 @@
 *.mobileprovision
 .env
 .env.*
+/CloudBridge/node_modules/

@@ -1,0 +1,1318 @@
+import type { IcloudSession } from "../session.js";
+import { appendDebugLog, loggedFetch } from "../debugLog.js";
+import { CloudKitRequestFailedError, CloudKitSyncTokenStalledError, CloudKitZoneFetchFailedError } from "../errors.js";
+import { isDeletedNote } from "../notes/decodeNoteRecord.js";
+
+export interface CloudKitFieldValue {
+  value: unknown;
+  type: string;
+}
+
+/** CloudKit's record-level bookkeeping for who wrote a record and when -
+ * distinct from the Notes-app-level CreationDate/ModificationDate fields. */
+export interface CloudKitRecordStamp {
+  /** ms epoch. */
+  timestamp: number;
+  deviceID?: string | undefined;
+}
+
+/** One participant of a `cloudkit.share` record, flattened from CloudKit's
+ * nested userIdentity shape to just what this tool uses: identifying the
+ * sharer (`type === "OWNER"`) by a human-readable name. */
+export interface ShareParticipant {
+  type?: string | undefined;
+  userRecordName?: string | undefined;
+  givenName?: string | undefined;
+  familyName?: string | undefined;
+  emailAddress?: string | undefined;
+  phoneNumber?: string | undefined;
+}
+
+export interface CloudKitRecord {
+  recordName: string;
+  recordType: string;
+  fields: Record<string, CloudKitFieldValue>;
+  recordChangeTag?: string | undefined;
+  deleted?: boolean | undefined;
+  /** The record's parent reference (for notes: the containing folder).
+   * Echoed back on updates the way the web client does. */
+  parentRecordName?: string | undefined;
+  created?: CloudKitRecordStamp | undefined;
+  modified?: CloudKitRecordStamp | undefined;
+  /** `cloudkit.share` records only: who shares this zone's content. */
+  participants?: ShareParticipant[] | undefined;
+  /** The `cloudkit.share` record this record is the root of, when shared -
+   * a shared Folder record carries this, linking it to the share whose
+   * `currentUserPermission` gates our writes into it. */
+  shareRecordName?: string | undefined;
+  /** `cloudkit.share` records only: this account's own permission on the
+   * share ("READ_WRITE" / "READ_ONLY"), straight from the response's
+   * `currentUserParticipant` - no participant matching needed. */
+  currentUserPermission?: string | undefined;
+}
+
+export interface ZoneChangesResult {
+  records: CloudKitRecord[];
+  syncToken: string | undefined;
+  /** True when the caller's sync token was rejected by the server and the
+   * zone was refetched from scratch instead. `records` is then a *complete
+   * listing* of the zone, not an incremental delta - deletions carry no
+   * tombstones, so a tracked record absent from it no longer exists remotely
+   * and the caller must reconcile that itself. */
+  resyncedFromScratch: boolean;
+}
+
+/** Which of the container's databases to talk to. Notes shared *with* this
+ * account live in zones of the `shared` database, owned by other users. */
+export type CloudKitDatabase = "private" | "shared";
+
+export interface CloudKitZoneID {
+  zoneName: string;
+  ownerRecordName?: string | undefined;
+}
+
+/** The database + zoneID a note's reads and writes go to. */
+export interface NoteZone {
+  database: CloudKitDatabase;
+  zoneID: CloudKitZoneID;
+}
+
+/** Own notes live in the private Notes zone; a shared note lives in its
+ * sharer's zone of the shared database (same zoneName, owner-qualified).
+ * `sharedZoneOwner` is the tracked note's state field of the same name. */
+export function noteZone(sharedZoneOwner: string | undefined): NoteZone {
+  return sharedZoneOwner === undefined
+    ? { database: "private", zoneID: { zoneName: "Notes" } }
+    : { database: "shared", zoneID: { zoneName: "Notes", ownerRecordName: sharedZoneOwner } };
+}
+
+/** One shared zone's worth of note records, tagged with its owner so state
+ * tracking can tell which sharer's zone each note came from. */
+export interface SharedZoneChanges {
+  zoneID: CloudKitZoneID;
+  records: CloudKitRecord[];
+  syncToken: string | undefined;
+  /** See `ZoneChangesResult.resyncedFromScratch` - same semantics, per zone. */
+  resyncedFromScratch: boolean;
+}
+
+// Client version identifiers observed from a real www.icloud.com session (see
+// projects/software/icloud-notes-sync.md dev notes). May need bumping over time.
+const CKJS_BUILD_VERSION = "2310ProjectDev27";
+const CKJS_VERSION = "2.6.4";
+
+// Wider than we strictly need today; matches what the real web client requests so
+// the server doesn't get an unfamiliar shape. Extra keys/types beyond what we
+// read are harmless.
+const NOTE_DESIRED_KEYS = [
+  "TitleEncrypted",
+  "SnippetEncrypted",
+  "FirstAttachmentUTIEncrypted",
+  "FirstAttachmentThumbnail",
+  "FirstAttachmentThumbnailOrientation",
+  "CreationDate",
+  "ModificationDate",
+  "Deleted",
+  "Folders",
+  "Folder",
+  "Attachments",
+  "ParentFolder",
+  "Note",
+  "LastViewedModificationDate",
+  "MinimumSupportedNotesVersion",
+  "DisplayTextEncrypted",
+  "StandardizedContentEncrypted",
+  "TokenContentIdentifierEncrypted",
+  "AltTextEncrypted",
+  "UTIEncrypted",
+  "MergeableDataEncrypted",
+  "IsPinned",
+  "TextDataEncrypted",
+  // Where a very large note keeps its text instead - see `inlineAssetBodies`.
+  "TextDataAsset",
+];
+
+const NOTE_DESIRED_RECORD_TYPES = [
+  "AccountData",
+  "Note",
+  "SearchIndexes",
+  "Folder",
+  "PasswordProtectedNote",
+  "User",
+  "Users",
+  "Note_UserSpecific",
+  "PasswordProtectedNote_UserSpecific",
+  "Folder_UserSpecific",
+  "cloudkit.share",
+  "Hashtag",
+  "InlineAttachment",
+];
+
+async function postDatabase(
+  label: string,
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  database: CloudKitDatabase,
+  operation: string,
+  body: unknown,
+): Promise<unknown> {
+  const params = new URLSearchParams({
+    ckjsBuildVersion: CKJS_BUILD_VERSION,
+    ckjsVersion: CKJS_VERSION,
+    clientId: session.clientId,
+    clientBuildNumber: session.clientBuildNumber,
+    clientMasteringNumber: session.clientMasteringNumber,
+    dsid,
+  });
+
+  const response = await loggedFetch(
+    label,
+    `${ckDatabaseHost}/database/1/com.apple.notes/production/${database}/${operation}?${params.toString()}`,
+    {
+      method: "POST",
+      headers: {
+        Cookie: session.cookie,
+        "Content-Type": "application/json",
+        Origin: "https://www.icloud.com",
+        Referer: "https://www.icloud.com/",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(body),
+    },
+  );
+
+  if (!response.ok) {
+    throw new CloudKitRequestFailedError(`${operation} request failed (${database} db): HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Fetches records in one Notes zone by paging through `changes/zone` until
+ * `moreComing` is false, following the same `syncToken`-based
+ * incremental-sync model the web client uses. Pass `sinceSyncToken` (from a
+ * prior call's result) to fetch only what changed since then; omit it for a
+ * full initial fetch. Returns the new syncToken so a future call can resume
+ * from here.
+ *
+ * A `sinceSyncToken` the server no longer accepts doesn't abort the fetch:
+ * the zone is refetched from scratch instead, reported via
+ * `resyncedFromScratch` (see `ZoneChangesResult`). Live probing (2026-07-31)
+ * established how an unusable token actually surfaces: a zone-level
+ * BAD_REQUEST inside an HTTP 200 ("Unknown sync continuation type" for a
+ * malformed token, "Invalid continuation format" for a corrupted one), while
+ * a merely *old* token - 15 days, in the probe - still syncs incrementally.
+ * A genuinely expired token can't be forced on demand, so BAD_REQUEST is the
+ * one observed failure shape and the only code that triggers the fallback;
+ * the web client offers no more guidance, since it holds tokens only in page
+ * memory and can never see one expire. If BAD_REQUEST was actually caused by
+ * something else in the request, the token-free retry hits it identically
+ * and that error propagates - the fallback only "sticks" when dropping the
+ * token was the fix.
+ *
+ * A page that says `moreComing` without advancing the syncToken throws
+ * `CloudKitSyncTokenStalledError` (see `assertPageAdvances`) and doesn't
+ * trigger that fallback. The server answered the token rather than rejecting
+ * it, so the guess is that dropping it isn't the fix - but a stall has never
+ * been observed, so that's a guess. If the stored private token itself is
+ * what's stuck, re-cloning into a new folder is the only way past it today.
+ */
+export async function fetchZoneNoteRecords(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  database: CloudKitDatabase,
+  zoneID: CloudKitZoneID,
+  sinceSyncToken?: string,
+  onPage?: (pageRecordCount: number) => void,
+): Promise<ZoneChangesResult> {
+  const walkFrom = async (startToken: string | undefined): Promise<{ records: CloudKitRecord[]; syncToken: string | undefined }> => {
+    const records: CloudKitRecord[] = [];
+    let syncToken: string | undefined = startToken;
+    let moreComing = true;
+
+    while (moreComing) {
+      const zoneRequest: Record<string, unknown> = {
+        zoneID,
+        desiredKeys: NOTE_DESIRED_KEYS,
+        desiredRecordTypes: NOTE_DESIRED_RECORD_TYPES,
+      };
+      // The shared database rejects `reverse` outright ("Reverse sync of share
+      // db is unsupported", BAD_REQUEST) - only send it where the web client
+      // does, on private-zone fetches.
+      if (database === "private") {
+        zoneRequest.reverse = true;
+      }
+      if (syncToken) {
+        zoneRequest.syncToken = syncToken;
+      }
+
+      const body = await postDatabase(
+        "fetchZoneNoteRecords:changes/zone",
+        session,
+        ckDatabaseHost,
+        dsid,
+        database,
+        "changes/zone",
+        { zones: [zoneRequest] },
+      );
+      const zone = firstZone(body);
+      const pageRecords = zone.records ?? [];
+
+      records.push(...pageRecords);
+      assertPageAdvances(`${database} changes/zone`, zone, syncToken, { startedFromStoredToken: Boolean(startToken) });
+      // `||`, not `??`: an empty token is no token (see `assertPageAdvances`),
+      // and saving one would make the next pull silently walk from scratch.
+      syncToken = zone.syncToken || syncToken;
+      moreComing = zone.moreComing === true;
+      onPage?.(pageRecords.length);
+    }
+
+    // Dedupe first, so a record listed twice has its asset downloaded once.
+    const deduped = await dedupeWalkRecords(
+      records,
+      `fetchZoneNoteRecords (${database} zone ${zoneID.ownerRecordName ?? "Notes"})`,
+    );
+    await inlineAssetBodies(deduped, { session, ckDatabaseHost, dsid, database, zoneID });
+    return { records: deduped, syncToken };
+  };
+
+  if (sinceSyncToken === undefined) {
+    return { ...(await walkFrom(undefined)), resyncedFromScratch: false };
+  }
+
+  try {
+    return { ...(await walkFrom(sinceSyncToken)), resyncedFromScratch: false };
+  } catch (error) {
+    if (!(error instanceof CloudKitZoneFetchFailedError) || error.serverErrorCode !== "BAD_REQUEST") {
+      throw error;
+    }
+    await appendDebugLog({
+      note:
+        `fetchZoneNoteRecords: stored sync token rejected (${error.serverErrorCode}: ${error.message}) - ` +
+        `refetching ${database} zone ${zoneID.ownerRecordName ?? "Notes"} from scratch`,
+    });
+    return { ...(await walkFrom(undefined)), resyncedFromScratch: true };
+  }
+}
+
+/**
+ * Fetches *every* record in the private Notes zone, of every type and with
+ * every field - unlike `fetchZoneNoteRecords`, no `desiredRecordTypes` or
+ * `desiredKeys` filter is sent (the sync path's filter notably excludes
+ * `Attachment` and `Media` records, exactly what record-level inspection
+ * most needs to see). Always a full walk from scratch; diagnostics want the
+ * complete current picture, not an incremental delta. Read-only.
+ */
+export async function fetchAllZoneRecords(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  onPage?: (pageRecordCount: number) => void,
+): Promise<CloudKitRecord[]> {
+  const records: CloudKitRecord[] = [];
+  let syncToken: string | undefined;
+  let moreComing = true;
+
+  while (moreComing) {
+    const zoneRequest: Record<string, unknown> = { zoneID: { zoneName: "Notes" }, reverse: true };
+    if (syncToken) {
+      zoneRequest.syncToken = syncToken;
+    }
+    const body = await postDatabase(
+      "fetchAllZoneRecords:changes/zone",
+      session,
+      ckDatabaseHost,
+      dsid,
+      "private",
+      "changes/zone",
+      { zones: [zoneRequest] },
+    );
+    const zone = firstZone(body);
+    records.push(...(zone.records ?? []));
+    assertPageAdvances("private changes/zone", zone, syncToken, { startedFromStoredToken: false });
+    syncToken = zone.syncToken || syncToken;
+    moreComing = zone.moreComing === true;
+    onPage?.((zone.records ?? []).length);
+  }
+
+  return dedupeWalkRecords(records, "fetchAllZoneRecords");
+}
+
+/**
+ * Collapses repeated occurrences of a record in one zone's `changes/zone`
+ * walk. CloudKit occasionally lists the same record on two pages of a single
+ * walk (issue #32: about 1 clone in 9 on a 118-note account). Kept as-is,
+ * clone writes that note twice - the second copy under a uniquified name and
+ * untracked - and the next push creates it in iCloud as a brand-new note.
+ *
+ * Callers pass one zone's records, so `recordName` is the key: the same name
+ * in another zone is a different record and is never collapsed here. Which
+ * occurrence wins doesn't depend on listing order:
+ *
+ * - A tombstone beats any live copy. That relies on a deleted record's name
+ *   never being reused, which holds for notes (their names are UUIDs) but
+ *   isn't a CloudKit guarantee: a fixed-name record like
+ *   `DefaultFolder-CloudKit`, deleted and recreated between two pages of one
+ *   walk, would lose its live copy here. A tombstone carries no `modified`,
+ *   so there's no timestamp to settle that case with.
+ * - Between live copies, the greater `modified.timestamp` wins, and a copy
+ *   without one ranks below any copy that has one.
+ * - Only an exact tie falls back to position, and goes to the later
+ *   occurrence. Private walks send `reverse: true`, and nothing captured so
+ *   far shows which way that orders a repeat, so "later" here is a tiebreak,
+ *   not evidence of recency.
+ *
+ * Change tags are opaque rather than ordered, so they are never compared. The
+ * winner takes the first occurrence's position, keeping file naming in
+ * listing order of first appearance.
+ *
+ * Ported from ferdousbhai/icloud-for-omarchy@fc242a5.
+ */
+export function dedupeZoneRecords(records: CloudKitRecord[]): CloudKitRecord[] {
+  // Map.set on an existing key keeps that key's original insertion position.
+  const winners = new Map<string, CloudKitRecord>();
+  for (const record of records) {
+    const kept = winners.get(record.recordName);
+    if (kept === undefined || recencyRank(record) >= recencyRank(kept)) {
+      winners.set(record.recordName, record);
+    }
+  }
+  return [...winners.values()];
+}
+
+/** How recent an occurrence is for `dedupeZoneRecords`: tombstones first,
+ * then live copies by `modified.timestamp`, with no timestamp lowest. */
+function recencyRank(record: CloudKitRecord): number {
+  if (record.deleted === true) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return record.modified?.timestamp ?? Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * `dedupeZoneRecords` for a finished walk, logging any record it collapsed.
+ * We haven't yet seen CloudKit repeat a record on a real account, so the
+ * debug log is the only evidence a repeat leaves behind once it's collapsed -
+ * including for anyone chasing issue #32 with `object list`.
+ */
+async function dedupeWalkRecords(records: CloudKitRecord[], context: string): Promise<CloudKitRecord[]> {
+  const deduped = dedupeZoneRecords(records);
+  if (deduped.length === records.length) {
+    return deduped;
+  }
+  const counts = new Map<string, number>();
+  for (const record of records) {
+    counts.set(record.recordName, (counts.get(record.recordName) ?? 0) + 1);
+  }
+  const repeats = [...counts].filter(([, count]) => count > 1).map(([name, count]) => `${name} x${count}`);
+  await appendDebugLog({
+    note: `${context}: collapsed ${records.length - deduped.length} repeated record listing(s) in one walk: ${repeats.join(", ")}`,
+  });
+  return deduped;
+}
+
+/** Fetches records in the account's own (private-database) Notes zone. */
+export async function fetchAllNoteRecords(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  sinceSyncToken?: string,
+  onPage?: (pageRecordCount: number) => void,
+): Promise<ZoneChangesResult> {
+  return fetchZoneNoteRecords(session, ckDatabaseHost, dsid, "private", { zoneName: "Notes" }, sinceSyncToken, onPage);
+}
+
+/**
+ * Lists the zones of the shared database - one per user who has shared
+ * note(s) with this account (`zoneName` is "Notes", `ownerRecordName`
+ * identifies the sharer). Mirrors the web client's `shared/changes/database`
+ * call, which it issues with an empty body on every load rather than a
+ * stored database-level syncToken (zone-level tokens carry the actual
+ * incremental state), then pages with the response's top-level `syncToken`
+ * until `moreComing` is false. A truncated listing would be silently
+ * destructive: any zone past page one looks vanished, and pull untracks
+ * every note from that sharer as "no longer shared with you".
+ */
+export async function fetchSharedZoneIds(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+): Promise<CloudKitZoneID[]> {
+  const zoneIds: CloudKitZoneID[] = [];
+  let syncToken: string | undefined;
+  let moreComing = true;
+
+  while (moreComing) {
+    const request: Record<string, unknown> = {};
+    if (syncToken) {
+      request.syncToken = syncToken;
+    }
+    const body = await postDatabase(
+      "fetchSharedZoneIds:changes/database",
+      session,
+      ckDatabaseHost,
+      dsid,
+      "shared",
+      "changes/database",
+      request,
+    );
+    const page = parseSharedZoneList(body);
+    zoneIds.push(...page.zoneIds);
+    // The web client treats this as fatal too ("Critical CK Error: Server
+    // returned the same sync token").
+    assertPageAdvances("shared changes/database", page, syncToken, { startedFromStoredToken: false });
+    syncToken = page.syncToken || syncToken;
+    moreComing = page.moreComing;
+  }
+
+  // A zone listed on two pages would otherwise be fetched - and its notes
+  // cloned - twice; see `dedupeZoneRecords` for the record-level version.
+  const seen = new Set<string>();
+  return zoneIds.filter((zoneID) => {
+    const key = JSON.stringify([zoneID.zoneName, zoneID.ownerRecordName ?? null]);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+/** One page of a shared `changes/database` listing; `moreComing`/`syncToken`
+ * drive the pagination loop in `fetchSharedZoneIds`. */
+export interface SharedZoneListPage {
+  zoneIds: CloudKitZoneID[];
+  moreComing: boolean;
+  syncToken: string | undefined;
+}
+
+export function parseSharedZoneList(body: unknown): SharedZoneListPage {
+  if (!isRecord(body) || !Array.isArray(body.zones)) {
+    throw new Error("Unexpected response shape from shared changes/database (missing zones array)");
+  }
+  const zoneIds = body.zones.flatMap((zone: unknown) => {
+    if (!isRecord(zone) || !isRecord(zone.zoneID) || typeof zone.zoneID.zoneName !== "string") {
+      throw new Error("Unexpected zone shape in shared changes/database response");
+    }
+    // A tombstoned zone (a share revoked or deleted, but still enumerated by
+    // `changes/database`) is unfetchable - `changes/zone` answers
+    // ZONE_NOT_FOUND for it - so don't let it into the fetch loop.
+    if (zone.deleted === true) {
+      return [];
+    }
+    return [
+      {
+        zoneName: zone.zoneID.zoneName,
+        ownerRecordName:
+          typeof zone.zoneID.ownerRecordName === "string" ? zone.zoneID.ownerRecordName : undefined,
+      },
+    ];
+  });
+  return {
+    zoneIds,
+    moreComing: body.moreComing === true,
+    syncToken: typeof body.syncToken === "string" ? body.syncToken : undefined,
+  };
+}
+
+/**
+ * Fetches full records by name from one zone via `records/lookup`. The
+ * shared database's `changes/zone` listing doesn't return note bodies
+ * (`TextDataEncrypted`) even when asked - the web client fetches those
+ * per-note through this same lookup call.
+ */
+/** CloudKit web services cap the operation list of a `records/lookup` at 200
+ * records per request; an unbounded batch (a large first shared pull) would
+ * fail the whole lookup at once. */
+const LOOKUP_BATCH_SIZE = 200;
+
+export async function lookupRecords(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  database: CloudKitDatabase,
+  zoneID: CloudKitZoneID,
+  recordNames: string[],
+): Promise<CloudKitRecord[]> {
+  return (await lookupRecordsWithMisses(session, ckDatabaseHost, dsid, database, zoneID, recordNames)).records;
+}
+
+/** `lookupRecords`, plus the names the server answered NOT_FOUND for. */
+async function lookupRecordsWithMisses(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  database: CloudKitDatabase,
+  zoneID: CloudKitZoneID,
+  recordNames: string[],
+): Promise<{ records: CloudKitRecord[]; notFound: Set<string> }> {
+  const records: CloudKitRecord[] = [];
+  const notFound = new Set<string>();
+  for (let start = 0; start < recordNames.length; start += LOOKUP_BATCH_SIZE) {
+    const batch = recordNames.slice(start, start + LOOKUP_BATCH_SIZE);
+    const body = await postDatabase(
+      "lookupRecords:records/lookup",
+      session,
+      ckDatabaseHost,
+      dsid,
+      database,
+      "records/lookup",
+      { records: batch.map((recordName) => ({ recordName })), zoneID },
+    );
+
+    if (!isRecord(body) || !Array.isArray(body.records)) {
+      throw new Error("Unexpected response shape from records/lookup (missing records array)");
+    }
+    // Per-record errors (e.g. NOT_FOUND for a record deleted since it was
+    // listed) come back as entries without `fields`/`recordType` - skip those
+    // rather than failing the whole lookup; the caller's record keeps whatever
+    // the zone listing returned and decides what a still-missing body means
+    // (`fetchSharedNoteRecords` treats it as a failed zone fetch).
+    for (const entry of body.records as unknown[]) {
+      if (!isRecord(entry)) {
+        continue;
+      }
+      if (typeof entry.recordType === "string" && isRecord(entry.fields)) {
+        records.push(parseRecord(entry));
+      } else if (entry.serverErrorCode === "NOT_FOUND" && typeof entry.recordName === "string") {
+        notFound.add(entry.recordName);
+      }
+    }
+  }
+  return { records, notFound };
+}
+
+/** A shared zone whose fetch didn't complete this run, skipped rather than
+ * fatal; see `fetchSharedNoteRecords`. Three distinct shapes:
+ *
+ * - `"zone-not-found"`: `changes/zone` answered ZONE_NOT_FOUND for a zone the
+ *   `changes/database` listing advertised - a share revoked or deleted out
+ *   from under the listing.
+ * - `"missing-note-bodies"`: the zone listed fine, but one or more live Note
+ *   records still had no `TextDataEncrypted` after the `records/lookup`
+ *   backfill (a throttled/failed per-record lookup, or a record deleted
+ *   between listing and lookup). Processing the zone anyway would classify
+ *   those notes unsyncable and permanently untrack them over what is usually
+ *   a transient failure - so the whole zone waits for a later pull, and its
+ *   syncToken must not advance.
+ * - `"stalled-sync-token"`: a `changes/zone` page said `moreComing` without
+ *   handing back a new syncToken (see `assertPageAdvances`). The zone's
+ *   listing is incomplete, so nothing from it is processed and its token
+ *   stays put - the same as a missing-bodies skip - but the rest of the pull
+ *   goes ahead rather than one sharer's stuck zone blocking the user's own
+ *   notes. */
+export type SkippedSharedZone =
+  | { zoneID: CloudKitZoneID; reason: "zone-not-found"; serverErrorCode: string }
+  | { zoneID: CloudKitZoneID; reason: "missing-note-bodies"; missingRecordNames: string[] }
+  | { zoneID: CloudKitZoneID; reason: "stalled-sync-token" };
+
+/** "3 note(s) (A, B, C)" for a missing-note-bodies skip, naming at most five
+ * records - enough to find the one note that holds a zone back every pull
+ * (with `object show`), without a first pull's failed lookup printing
+ * hundreds. */
+export function describeMissingNotes(recordNames: string[]): string {
+  const shown = recordNames.slice(0, 5).join(", ");
+  const more = recordNames.length > 5 ? `, and ${recordNames.length - 5} more` : "";
+  return `${recordNames.length} note(s) (${shown}${more})`;
+}
+
+export interface SharedNoteRecordsResult {
+  zones: SharedZoneChanges[];
+  skippedZones: SkippedSharedZone[];
+}
+
+/**
+ * Fetches every shared zone's note records, filling in note bodies (via
+ * `records/lookup`) for live Note records the zone listing returned without
+ * `TextDataEncrypted`. `sinceSyncTokens` is keyed by the zone owner's
+ * recordName; zones without an entry are fetched from scratch.
+ *
+ * A zone that answers ZONE_NOT_FOUND (a share revoked/deleted but still
+ * enumerated by `changes/database`) is reported in `skippedZones` instead of
+ * aborting the run - one unfetchable share shouldn't discard every other
+ * zone's successful results. So is a zone with note bodies still missing
+ * after the lookup backfill (see `SkippedSharedZone`): its results are
+ * incomplete, and acting on them would untrack notes over a transient
+ * failure. So is a zone whose paging stalls (see `SkippedSharedZone`). Any
+ * other zone-level error stays fatal: that's a broken fetch, not a missing
+ * zone, and swallowing it would make it look like a clean sync.
+ */
+export async function fetchSharedNoteRecords(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  sinceSyncTokens: Record<string, string> = {},
+  onPage?: (pageRecordCount: number) => void,
+): Promise<SharedNoteRecordsResult> {
+  const zoneIds = await fetchSharedZoneIds(session, ckDatabaseHost, dsid);
+  const zones: SharedZoneChanges[] = [];
+  const skippedZones: SkippedSharedZone[] = [];
+
+  for (const zoneID of zoneIds) {
+    const owner = zoneID.ownerRecordName;
+    const sinceSyncToken = owner ? sinceSyncTokens[owner] : undefined;
+    try {
+      const { records, syncToken, resyncedFromScratch } = await fetchZoneNoteRecords(
+        session,
+        ckDatabaseHost,
+        dsid,
+        "shared",
+        zoneID,
+        sinceSyncToken,
+        onPage,
+      );
+
+      const missingBody = records.filter(needsBodyLookup);
+      if (missingBody.length > 0) {
+        const lookedUp = await lookupRecords(
+          session,
+          ckDatabaseHost,
+          dsid,
+          "shared",
+          zoneID,
+          missingBody.map((record) => record.recordName),
+        );
+        mergeLookedUpRecords(records, lookedUp);
+        await inlineAssetBodies(records, { session, ckDatabaseHost, dsid, database: "shared", zoneID });
+      }
+
+      // A body still missing after the lookup means this zone's fetch is
+      // incomplete, not that those notes are unsyncable - hand the zone back
+      // as skipped (old syncToken kept, no records processed) so a transient
+      // lookup failure costs one pull, not the note's tracking.
+      const stillMissing = records.filter(needsBodyLookup);
+      if (stillMissing.length > 0) {
+        skippedZones.push({
+          zoneID,
+          reason: "missing-note-bodies",
+          missingRecordNames: stillMissing.map((record) => record.recordName),
+        });
+        continue;
+      }
+
+      zones.push({ zoneID, records, syncToken, resyncedFromScratch });
+    } catch (error) {
+      if (error instanceof CloudKitZoneFetchFailedError && error.serverErrorCode === "ZONE_NOT_FOUND") {
+        skippedZones.push({ zoneID, reason: "zone-not-found", serverErrorCode: error.serverErrorCode });
+        continue;
+      }
+      if (error instanceof CloudKitSyncTokenStalledError) {
+        skippedZones.push({ zoneID, reason: "stalled-sync-token" });
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  return { zones, skippedZones };
+}
+
+/** Where a zone's records came from - enough to `lookup` one again. */
+interface ZoneSource {
+  session: IcloudSession;
+  ckDatabaseHost: string;
+  dsid: string;
+  database: CloudKitDatabase;
+  zoneID: CloudKitZoneID;
+}
+
+/**
+ * Moves a very large note's text inline, where every reader expects it.
+ * Past some size Apple stores a note's text as a `TextDataAsset` instead of
+ * `TextDataEncrypted`, and the record then carries no `TextDataEncrypted` at
+ * all - so without this the note reads as body-less and is never cloned or
+ * pulled. The asset holds the same bytes the inline field would (a gzipped
+ * NoteStoreProto document, confirmed against a real ~830 KB note, 2026-09-26),
+ * so its download is inlined as-is and decodes on the normal path.
+ *
+ * Only the in-memory record changes. Push re-reads the record before any
+ * write and still refuses a note stored as an asset.
+ *
+ * A download that fails even after a fresh `lookup` (see
+ * `resolveTextAsset`) must not read as a clean sync while the syncToken
+ * moves past the note. In the private zone it throws: there's only the one
+ * zone, so holding it back and failing are the same thing. In a shared zone
+ * the body is left missing, and `fetchSharedNoteRecords`' existing
+ * missing-note-bodies check holds that zone (and its token) back while every
+ * other zone syncs.
+ *
+ * A note that changed after it was listed is taken as it is now: one edited
+ * back under the size limit replaces the listed record with its inline
+ * text, and one gone since (the lookup answers NOT_FOUND) is left without a
+ * body until the next pull lists the deletion. In the private zone it then
+ * reads as missing-body, which never untracks a note; in a shared zone it
+ * holds the zone back one pull, as any body lookup that misses does.
+ */
+async function inlineAssetBodies(records: CloudKitRecord[], source: ZoneSource): Promise<void> {
+  for (let i = 0; i < records.length; i += 1) {
+    const record = records[i];
+    if (!record || !needsBodyLookup(record) || record.fields.TextDataAsset?.value == null) {
+      continue;
+    }
+    try {
+      const resolved = await resolveTextAsset(record, source);
+      if (resolved) {
+        records[i] = resolved;
+      }
+    } catch (error) {
+      if (source.database === "private") {
+        throw error;
+      }
+      await appendDebugLog({
+        note:
+          `inlineAssetBodies: couldn't download the text of shared note ${record.recordName} ` +
+          `(${error instanceof Error ? error.message : String(error)}) - leaving its body missing`,
+      });
+    }
+  }
+}
+
+/**
+ * Returns `record` with its `TextDataAsset` downloaded into
+ * `TextDataEncrypted`, retrying once against a fresh `lookup` of the record
+ * if the first attempt fails. The download URLs expire, and
+ * `inlineAssetBodies` runs only after a zone's whole paged walk, so on a big
+ * clone the listing's URL can already be minutes old. A record with no
+ * usable `downloadURL` takes the same path rather than passing as body-less.
+ *
+ * Once the retry has looked the note up again, the fresh record is the one
+ * returned: as is when it no longer needs a download (its text is inline
+ * again, or it's been deleted), undefined when the lookup says it's gone.
+ */
+async function resolveTextAsset(record: CloudKitRecord, source: ZoneSource): Promise<CloudKitRecord | undefined> {
+  try {
+    return withInlinedText(record, await fetchAssetBytes(textAssetDownloadURL(record)));
+  } catch (firstError) {
+    const { records, notFound } = await lookupRecordsWithMisses(
+      source.session,
+      source.ckDatabaseHost,
+      source.dsid,
+      source.database,
+      source.zoneID,
+      [record.recordName],
+    );
+    const [fresh] = records;
+    if (!fresh) {
+      if (notFound.has(record.recordName)) {
+        await appendDebugLog({
+          note: `inlineAssetBodies: note ${record.recordName} was deleted after it was listed - leaving its body missing`,
+        });
+        return undefined;
+      }
+      throw firstError;
+    }
+    if (!needsBodyLookup(fresh)) {
+      return fresh;
+    }
+    try {
+      return withInlinedText(fresh, await fetchAssetBytes(textAssetDownloadURL(fresh)));
+    } catch (retryError) {
+      const detail = retryError instanceof Error ? retryError.message : String(retryError);
+      throw new CloudKitRequestFailedError(
+        `Couldn't download the text of note ${record.recordName}, which Apple keeps in a separate file: ${detail}`,
+      );
+    }
+  }
+}
+
+function withInlinedText(record: CloudKitRecord, bytes: Buffer): CloudKitRecord {
+  record.fields.TextDataEncrypted = { value: bytes.toString("base64"), type: "ENCRYPTED_BYTES" };
+  return record;
+}
+
+function textAssetDownloadURL(record: CloudKitRecord): string {
+  const asset = record.fields.TextDataAsset?.value;
+  if (!isRecord(asset) || typeof asset.downloadURL !== "string" || asset.downloadURL === "") {
+    throw new CloudKitRequestFailedError(`note ${record.recordName}'s TextDataAsset has no download URL`);
+  }
+  return asset.downloadURL;
+}
+
+/** Whether a record is a live note still missing its text. A note in
+ * Recently Deleted or marked `Deleted` is classified "deleted" whatever its
+ * body, so fetching one - an asset download, or holding back a shared zone
+ * over it - would only cost something. */
+function needsBodyLookup(record: CloudKitRecord): boolean {
+  if (record.recordType !== "Note" || isDeletedNote(record)) {
+    return false;
+  }
+  return typeof record.fields.TextDataEncrypted?.value !== "string";
+}
+
+/** Replaces zone-listing records in place with their full looked-up versions. */
+export function mergeLookedUpRecords(records: CloudKitRecord[], lookedUp: CloudKitRecord[]): void {
+  const byName = new Map(lookedUp.map((record) => [record.recordName, record]));
+  for (let i = 0; i < records.length; i += 1) {
+    const record = records[i];
+    if (!record) {
+      continue;
+    }
+    const full = byName.get(record.recordName);
+    if (full) {
+      records[i] = {
+        ...full,
+        // The lookup response omits recordChangeTag-independent metadata we
+        // already have; keep the listing's changeTag if the lookup lacks one.
+        recordChangeTag: full.recordChangeTag ?? record.recordChangeTag,
+      };
+    }
+  }
+}
+
+/**
+ * Downloads an attachment's raw bytes from its signed `cvws.icloud-content.com`
+ * URL (the `downloadURL` on a Media record's `Asset` field). These URLs are
+ * plain, unauthenticated GETs - no cookie or session header, just the
+ * signature baked into the query string - confirmed against real captures of
+ * both an audio and an image attachment (dev notes, 2026-07-13/14). They do
+ * carry an expiry (`e=` query param), so a stored URL can go stale; re-`lookup`
+ * the owning record to get a fresh one rather than retrying the same URL.
+ */
+export async function fetchAssetBytes(downloadURL: string): Promise<Buffer> {
+  const response = await loggedFetch("fetchAssetBytes", downloadURL, {
+    method: "GET",
+    headers: { Origin: "https://www.icloud.com", Referer: "https://www.icloud.com/" },
+  });
+  if (!response.ok) {
+    throw new CloudKitRequestFailedError(`Attachment download failed: HTTP ${response.status}`);
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
+
+export interface NoteUpdate {
+  recordName: string;
+  /** Optimistic-concurrency token: the server rejects the update if the
+   * record has moved past this tag - exactly the "don't clobber a change
+   * you haven't seen" primitive push is built on. */
+  recordChangeTag: string;
+  fields: Record<string, { value: unknown }>;
+  parentRecordName?: string | undefined;
+}
+
+export type NoteUpdateResult =
+  | { ok: true; record: CloudKitRecord }
+  | { ok: false; serverErrorCode: string; reason: string | undefined };
+
+/**
+ * Updates one note via `records/modify`, using the same single-operation
+ * `update` shape the web client sends. Per-record failures (notably a
+ * changeTag conflict) come back inside an HTTP 200 as `serverErrorCode` on
+ * the record entry; those are returned as a typed refusal rather than
+ * thrown, since "someone else edited this note" is an expected outcome the
+ * caller wants to report per-note.
+ */
+export async function updateNoteRecord(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  database: CloudKitDatabase,
+  zoneID: CloudKitZoneID,
+  update: NoteUpdate,
+): Promise<NoteUpdateResult> {
+  const [result] = await updateRecords(session, ckDatabaseHost, dsid, database, zoneID, [{ ...update, recordType: "Note" }]);
+  if (!result) {
+    throw new Error("Unexpected response shape from records/modify (missing records array)");
+  }
+  return result;
+}
+
+export function parseNoteUpdateResponse(body: unknown): NoteUpdateResult {
+  if (!isRecord(body) || !Array.isArray(body.records) || body.records.length === 0) {
+    throw new Error("Unexpected response shape from records/modify (missing records array)");
+  }
+  const entry: unknown = body.records[0];
+  if (!isRecord(entry)) {
+    throw new Error("Unexpected response shape from records/modify (record entry is not an object)");
+  }
+  if (typeof entry.serverErrorCode === "string") {
+    return {
+      ok: false,
+      serverErrorCode: entry.serverErrorCode,
+      reason: typeof entry.reason === "string" ? entry.reason : undefined,
+    };
+  }
+  return { ok: true, record: parseRecord(entry) };
+}
+
+/** Extras a shared-database create needs beyond the private-proven shape:
+ * CloudKit record hierarchy (`parent` at the containing Folder record) is
+ * what makes the new note a member of the folder's share, and the captured
+ * shared create also asks for a short GUID. The private-db capture sent
+ * both too, but our private path omits them and is live-verified - they're
+ * optional there, so the private shape stays untouched. */
+export interface CreateNoteExtras {
+  parentRecordName?: string | undefined;
+  createShortGUID?: boolean | undefined;
+}
+
+/**
+ * Creates one brand-new Note record via `records/modify`, mirroring the
+ * captured first-ever save of a fresh note (operationType "create", a
+ * client-generated recordName, no recordChangeTag - see the 2026-07-16
+ * lifecycle HAR analysis; the shared-database variant is the 2026-07-17
+ * shared-note-modifications capture). The response is a full record
+ * carrying the note's first recordChangeTag, same shape as an update's.
+ */
+export async function createNoteRecord(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  database: CloudKitDatabase,
+  zoneID: CloudKitZoneID,
+  recordName: string,
+  fields: Record<string, { value: unknown }>,
+  extras: CreateNoteExtras = {},
+): Promise<NoteUpdateResult> {
+  return createZoneRecord("Note", session, ckDatabaseHost, dsid, database, zoneID, recordName, fields, extras);
+}
+
+/**
+ * Creates one brand-new Folder record. A folder is a far smaller thing than
+ * a note on the wire: a top-level one carries a single `TitleEncrypted`
+ * field and nothing else (confirmed against a folder created by the web
+ * client, 2026-07-30), and a nested one adds a `ParentFolder` reference plus
+ * the matching CloudKit record-level parent - see `encodeFolderRecord.ts`
+ * for the field construction.
+ */
+export async function createFolderRecord(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  database: CloudKitDatabase,
+  zoneID: CloudKitZoneID,
+  recordName: string,
+  fields: Record<string, { value: unknown }>,
+  extras: CreateNoteExtras = {},
+): Promise<NoteUpdateResult> {
+  return createZoneRecord("Folder", session, ckDatabaseHost, dsid, database, zoneID, recordName, fields, extras);
+}
+
+/**
+ * The `records/modify` create the two wrappers above submit, by record type.
+ *
+ * Exported because record types beyond Note and Folder do get created against
+ * a real zone - `Attachment`, for the live suite's planted table fixture
+ * (`integration/plantTable.ts`). Keeping that on this one code path is the
+ * point: the harness writes through the same request builder, logging and
+ * response parsing as production rather than a second, unproven copy of them.
+ */
+export async function createZoneRecord(
+  recordType: string,
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  database: CloudKitDatabase,
+  zoneID: CloudKitZoneID,
+  recordName: string,
+  fields: Record<string, { value: unknown }>,
+  extras: CreateNoteExtras = {},
+): Promise<NoteUpdateResult> {
+  const record: Record<string, unknown> = { recordName, recordType, fields };
+  if (extras.parentRecordName !== undefined) {
+    record.parent = { recordName: extras.parentRecordName };
+  }
+  if (extras.createShortGUID === true) {
+    record.createShortGUID = true;
+  }
+  const label = `create${recordType}Record:records/modify`;
+  const body = await postDatabase(label, session, ckDatabaseHost, dsid, database, "records/modify", {
+    operations: [{ operationType: "create", record }],
+    zoneID,
+  });
+  return parseNoteUpdateResponse(body);
+}
+
+export type NoteDeleteResult =
+  | { ok: true }
+  | { ok: false; serverErrorCode: string; reason: string | undefined };
+
+/**
+ * Deletes one record via CloudKit's `forceDelete` operation. NOT what
+ * Apple's own clients do for user-facing note deletion - both stages of
+ * that flow are ordinary updates (trash-move, then `Deleted: 1`; see the
+ * 2026-07-16 lifecycle/purge HAR analyses), and `forceDelete` on a Note is
+ * rejected with `VALIDATING_REFERENCE_ERROR` whenever an Attachment record
+ * still references it (confirmed live). Kept for record-level plumbing (the
+ * `object` command family): it's the only way to delete a *non-Note* record
+ * such as an orphaned Attachment, live-verified to work when nothing
+ * references the target.
+ */
+export async function forceDeleteRecord(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  zoneID: CloudKitZoneID,
+  recordName: string,
+  recordType: string,
+  recordChangeTag: string,
+): Promise<NoteDeleteResult> {
+  const body = await postDatabase(
+    "forceDeleteRecord:records/modify",
+    session,
+    ckDatabaseHost,
+    dsid,
+    "private",
+    "records/modify",
+    {
+      operations: [
+        { operationType: "forceDelete", record: { recordName, recordType, recordChangeTag } },
+      ],
+      zoneID,
+    },
+  );
+  return parseNoteDeleteResponse(body);
+}
+
+/**
+ * A successful `forceDelete` response record entry looks nothing like an
+ * `update` one - confirmed live 2026-07-16: `{"recordName": "...",
+ * "deleted": true}`, with no `recordType`/`fields`/`recordChangeTag` at
+ * all. `parseNoteUpdateResponse`'s `parseRecord` call requires those, so it
+ * throws on a genuinely successful delete - this is a dedicated parser
+ * instead of a shared one, since there's no full record to hand back to a
+ * delete caller anyway (there's nothing left to describe).
+ */
+export function parseNoteDeleteResponse(body: unknown): NoteDeleteResult {
+  if (!isRecord(body) || !Array.isArray(body.records) || body.records.length === 0) {
+    throw new Error("Unexpected response shape from records/modify (missing records array)");
+  }
+  const entry: unknown = body.records[0];
+  if (!isRecord(entry)) {
+    throw new Error("Unexpected response shape from records/modify (record entry is not an object)");
+  }
+  if (typeof entry.serverErrorCode === "string") {
+    return {
+      ok: false,
+      serverErrorCode: entry.serverErrorCode,
+      reason: typeof entry.reason === "string" ? entry.reason : undefined,
+    };
+  }
+  if (typeof entry.recordName !== "string") {
+    throw new Error("Unexpected response shape from records/modify (record entry has no recordName)");
+  }
+  return { ok: true };
+}
+
+export interface RecordUpdate {
+  recordName: string;
+  /** Unlike the single-record `updateNoteRecord`, not hardcoded to "Note" -
+   * a table write needs to update a Note record and an Attachment record
+   * (the table's own `MergeableDataEncrypted`) atomically in one call. */
+  recordType: string;
+  /** Optimistic-concurrency token; see `NoteUpdate`. */
+  recordChangeTag: string;
+  fields: Record<string, { value: unknown }>;
+  parentRecordName?: string | undefined;
+}
+
+export type RecordUpdateResult = NoteUpdateResult;
+
+/**
+ * Updates any number of records in one zone via a single `records/modify`
+ * call with one `update` operation per record - the real CloudKit endpoint
+ * already accepts multiple operations atomically per zone; `updateNoteRecord`
+ * used to hardcode a single-element operations array as a self-imposed
+ * limitation, not a server one. Results come back in the same order as
+ * `updates`, each independently `ok`/refused (a changeTag conflict on one
+ * record doesn't fail the others) - though a caller relying on the *write*
+ * being atomic (e.g. a note's text and its table changing together) should
+ * still treat any non-`ok` result as "nothing in this batch should be
+ * trusted as applied", since CloudKit only guarantees atomicity of the
+ * write itself, not of how per-record failures are reported back.
+ */
+export async function updateRecords(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  database: CloudKitDatabase,
+  zoneID: CloudKitZoneID,
+  updates: RecordUpdate[],
+): Promise<RecordUpdateResult[]> {
+  const operations = updates.map((update) => {
+    const record: Record<string, unknown> = {
+      recordName: update.recordName,
+      recordType: update.recordType,
+      recordChangeTag: update.recordChangeTag,
+      fields: update.fields,
+    };
+    if (update.parentRecordName !== undefined) {
+      record.parent = { recordName: update.parentRecordName };
+    }
+    return { operationType: "update", record };
+  });
+
+  const body = await postDatabase(
+    "updateRecords:records/modify",
+    session,
+    ckDatabaseHost,
+    dsid,
+    database,
+    "records/modify",
+    { operations, zoneID, atomic: true },
+  );
+  return parseRecordUpdateResponse(body);
+}
+
+export function parseRecordUpdateResponse(body: unknown): RecordUpdateResult[] {
+  if (!isRecord(body) || !Array.isArray(body.records)) {
+    throw new Error("Unexpected response shape from records/modify (missing records array)");
+  }
+  return body.records.map((entry: unknown) => {
+    if (!isRecord(entry)) {
+      throw new Error("Unexpected response shape from records/modify (record entry is not an object)");
+    }
+    if (typeof entry.serverErrorCode === "string") {
+      return {
+        ok: false,
+        serverErrorCode: entry.serverErrorCode,
+        reason: typeof entry.reason === "string" ? entry.reason : undefined,
+      };
+    }
+    return { ok: true, record: parseRecord(entry) };
+  });
+}
+
+interface ParsedZone {
+  moreComing?: boolean | undefined;
+  syncToken?: string | undefined;
+  records?: CloudKitRecord[] | undefined;
+}
+
+export function firstZone(body: unknown): ParsedZone {
+  if (!isRecord(body) || !Array.isArray(body.zones) || body.zones.length === 0) {
+    throw new Error("Unexpected response shape from changes/zone (missing zones array)");
+  }
+  const zone: unknown = body.zones[0];
+  if (!isRecord(zone)) {
+    throw new Error("Unexpected response shape from changes/zone (zone entry is not an object)");
+  }
+  // Zone-level failures arrive inside an HTTP 200: the zone entry carries
+  // serverErrorCode/reason instead of records. Treating that as "no records"
+  // would make a broken fetch look like a clean empty sync.
+  if (typeof zone.serverErrorCode === "string") {
+    const reason = typeof zone.reason === "string" ? zone.reason : "no reason given";
+    throw new CloudKitZoneFetchFailedError(zone.serverErrorCode, reason);
+  }
+
+  const records = Array.isArray(zone.records) ? zone.records.map(parseZoneRecord) : undefined;
+  return {
+    moreComing: typeof zone.moreComing === "boolean" ? zone.moreComing : undefined,
+    syncToken: typeof zone.syncToken === "string" ? zone.syncToken : undefined,
+    records,
+  };
+}
+
+/**
+ * Guards every paged listing (`changes/zone` and `changes/database`): a page
+ * that says `moreComing` but hands back no syncToken, or the one the request
+ * carried, would have the paging loop request that same page forever. An
+ * empty token counts as none, since every request builder here skips a falsy
+ * token - letting `""` through would silently restart the walk from scratch.
+ * Throws rather than looping; nothing gathered so far is returned, so the
+ * caller keeps its old token and a partial listing is never acted on.
+ *
+ * Only the token just sent is compared, so a server cycling between tokens
+ * (`A -> B -> A ...`) would still page without end; that has never been seen.
+ */
+function assertPageAdvances(
+  label: string,
+  page: { moreComing?: boolean | undefined; syncToken?: string | undefined },
+  requestToken: string | undefined,
+  options: { startedFromStoredToken: boolean },
+): void {
+  if (page.moreComing === true && (!page.syncToken || page.syncToken === requestToken)) {
+    throw new CloudKitSyncTokenStalledError(label, options);
+  }
+}
+
+/**
+ * `changes/zone` reports a deletion that happened since the last sync token
+ * the same way `records/modify`'s `forceDelete` reports success (see
+ * `parseNoteDeleteResponse`): `{"recordName": "...", "deleted": true}`, with
+ * no `recordType`/`fields` at all - confirmed live 2026-07-16 after deleting
+ * a note and then pulling. `parseRecord` requires those fields for a live
+ * record and throws on this shape. We don't know the deleted record's
+ * original `recordType` from the tombstone alone, but `pull` only acts on a
+ * deletion when the `recordName` matches something it already tracks as a
+ * Note, so tagging it "Note" here is harmless even if the tombstone was for
+ * something else - the lookup by `recordName` just won't match and it's
+ * skipped, same as it would be if not "Note" going in.
+ */
+function parseZoneRecord(value: unknown): CloudKitRecord {
+  if (isRecord(value) && typeof value.recordName === "string" && value.deleted === true && !isRecord(value.fields)) {
+    return { recordName: value.recordName, recordType: "Note", fields: {}, deleted: true };
+  }
+  return parseRecord(value);
+}
+
+function parseRecord(value: unknown): CloudKitRecord {
+  if (
+    !isRecord(value) ||
+    typeof value.recordName !== "string" ||
+    typeof value.recordType !== "string" ||
+    !isRecord(value.fields)
+  ) {
+    throw new Error("Unexpected record shape in changes/zone response");
+  }
+
+  const fields: Record<string, CloudKitFieldValue> = {};
+  for (const [key, fieldValue] of Object.entries(value.fields)) {
+    if (isRecord(fieldValue) && typeof fieldValue.type === "string") {
+      fields[key] = { value: fieldValue.value, type: fieldValue.type };
+    }
+  }
+
+  const parent = isRecord(value.parent) && typeof value.parent.recordName === "string" ? value.parent.recordName : undefined;
+  const share = isRecord(value.share) && typeof value.share.recordName === "string" ? value.share.recordName : undefined;
+  const currentUserParticipant = isRecord(value.currentUserParticipant) ? value.currentUserParticipant : undefined;
+  return {
+    recordName: value.recordName,
+    recordType: value.recordType,
+    fields,
+    recordChangeTag: typeof value.recordChangeTag === "string" ? value.recordChangeTag : undefined,
+    deleted: typeof value.deleted === "boolean" ? value.deleted : undefined,
+    parentRecordName: parent,
+    created: parseRecordStamp(value.created),
+    modified: parseRecordStamp(value.modified),
+    participants: parseParticipants(value.participants),
+    shareRecordName: share,
+    currentUserPermission:
+      typeof currentUserParticipant?.permission === "string" ? currentUserParticipant.permission : undefined,
+  };
+}
+
+function parseParticipants(value: unknown): ShareParticipant[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value.filter(isRecord).map((participant) => {
+    const identity = isRecord(participant.userIdentity) ? participant.userIdentity : {};
+    const nameComponents = isRecord(identity.nameComponents) ? identity.nameComponents : {};
+    const lookupInfo = isRecord(identity.lookupInfo) ? identity.lookupInfo : {};
+    return {
+      type: typeof participant.type === "string" ? participant.type : undefined,
+      userRecordName: typeof identity.userRecordName === "string" ? identity.userRecordName : undefined,
+      givenName: typeof nameComponents.givenName === "string" ? nameComponents.givenName : undefined,
+      familyName: typeof nameComponents.familyName === "string" ? nameComponents.familyName : undefined,
+      emailAddress: typeof lookupInfo.emailAddress === "string" ? lookupInfo.emailAddress : undefined,
+      phoneNumber: typeof lookupInfo.phoneNumber === "string" ? lookupInfo.phoneNumber : undefined,
+    };
+  });
+}
+
+function parseRecordStamp(value: unknown): CloudKitRecordStamp | undefined {
+  if (!isRecord(value) || typeof value.timestamp !== "number") {
+    return undefined;
+  }
+  return {
+    timestamp: value.timestamp,
+    deviceID: typeof value.deviceID === "string" ? value.deviceID : undefined,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}

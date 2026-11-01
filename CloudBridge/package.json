@@ -1,0 +1,19 @@
+{
+  "name": "notesplus-cloud-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/service.ts --bundle --platform=node --format=esm --target=node22 --outfile=../build/structured/bridge.mjs",
+    "test": "tsx --test src/*.test.ts vendor/icloud-md/src/notes/{noteDocument,tablePushEdit,formatReconcile}.test.ts"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.12.1",
+    "node-diff3": "3.2.1",
+    "mdast-util-to-string": "4.0.0",
+    "remark-gfm": "4.0.1",
+    "remark-parse": "11.0.0",
+    "remark-stringify": "11.0.0",
+    "unified": "11.0.5"
+  },
+  "devDependencies": { "esbuild": "0.25.12", "tsx": "4.20.6", "typescript": "5.9.3", "@types/node": "22.19.0" }
+}
