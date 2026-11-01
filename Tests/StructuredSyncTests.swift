@@ -45,8 +45,15 @@ actor DelayedCloud:CloudRequesting {
         let raw=try JSONSerialization.jsonObject(with:draft) as! [String:Any]
         let stored=try JSONDecoder().decode(CloudDocument.self,from:JSONSerialization.data(withJSONObject:raw["document"]!))
         precondition(stored==continued,"Full structured draft survives conflict on disk")
+        let restored=StructuredModel(client:backend,account:account,startTasks:false,support:support)
+        await restored.select("sync-fixture")
+        precondition(restored.dirty && restored.document==continued,"Restart restores complete conflicted draft")
         await backend.setFailure(false);await model.save()
         precondition(!model.dirty,"Editing remains saveable after retry")
+        await backend.setRemote(base)
+        let reopened=StructuredModel(client:backend,account:account,startTasks:false,support:support)
+        await reopened.select("sync-fixture")
+        precondition(reopened.document==continued && !reopened.dirty,"Persisted history rejects stale read after restart")
         print("PASS: in-flight typing, acknowledged-save echo rejection, iPhone edit return, conflict draft, retry")
     }
 }
