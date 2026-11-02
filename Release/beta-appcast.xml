@@ -1,8 +1,22 @@
-<?xml version="1.0" standalone="yes"?><!-- sparkle-sign-warning:
+<?xml version="1.0" standalone="yes"?>
+<!-- sparkle-sign-warning:
 IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
---><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+-->
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>NotesPlus</title>
+        <item>
+            <title>0.8.0-beta.2</title>
+            <pubDate>Mon, 02 Nov 2026 23:54:26 +0900</pubDate>
+            <link>https://github.com/Recrude/NotesPlus/releases/tag/v0.8.0-beta.2</link>
+            <sparkle:version>802</sparkle:version>
+            <sparkle:shortVersionString>0.8.0-beta.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<!doctype html><html lang="ko"><meta charset="utf-8"><title>NotesPlus 0.8.0-beta.2</title><body><h1>NotesPlus 0.8.0-beta.2</h1><ul><li>이미지와 복합 서식이 있는 메모에서도 주변 본문을 계속 편집합니다.</li><li>첨부 참조, 색상·강조·지정 서체·문단 정렬을 보존하고 변경하지 않은 표는 다시 쓰지 않습니다.</li><li>새 편집기의 문서 이력 식별자 순서 오류로 기본 메모에서 본문이 중복되던 문제를 수정했습니다.</li><li>입력과 저장을 분리하고 원본 보존 검사를 통과한 변경만 업로드합니다.</li></ul><p>첨부 추가·삭제·이동과 복합 표 영역의 편집은 아직 제한됩니다. 이미 중복된 본문을 자동 삭제하지는 않습니다. Apple Silicon / macOS 26 이상. Developer ID 및 Apple 공증 없음.</p></body></html>
+]]></description>
+            <enclosure url="https://github.com/Recrude/NotesPlus/releases/download/v0.8.0-beta.2/NotesPlus-0.8.0-beta.2-macOS-arm64.zip" length="39153929" type="application/octet-stream" sparkle:edSignature="dw6B7jICL1/65gbGfsx6saFqxv+dvtrO7kn9/nMcCq7O6Q03iEehlplStB4Phsnjoje1w4Ug7JGRcWlhFCciDQ=="/>
+        </item>
         <item>
             <title>0.8.0-beta.1</title>
             <pubDate>Mon, 02 Nov 2026 17:13:03 +0900</pubDate>
@@ -21,10 +35,11 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
 <p>0.7에서 처음 전환할 때 Apple 페이지에서 iCloud 연결이 필요합니다. 잠금·공유·이미지 첨부·지원하지 않는 복합 서식 등은 편집하지 않습니다. 표 전체 이동·삭제와 표 셀의 인라인 서식 변경은 미지원입니다.</p>
 <p>Developer ID 서명 및 Apple 공증 없음. 설치 방법과 범위는 DMG의 READ-ME.txt를 확인하세요.</p>
 ]]></description>
-            <enclosure url="https://github.com/Recrude/NotesPlus/releases/download/v0.8.0-beta.1/NotesPlus-0.8.0-beta.1-macOS-arm64.zip" length="39108165" type="application/octet-stream" sparkle:edSignature="/oBD4myJ6TXReOEyLoYwNst97NFDs9VGkLEIgBDYi8YwrA1QlC0QUxGuHda9Cc+pXiak7sDY1GJNZEPg4N/eBw=="></enclosure>
+            <enclosure url="https://github.com/Recrude/NotesPlus/releases/download/v0.8.0-beta.1/NotesPlus-0.8.0-beta.1-macOS-arm64.zip" length="39108165" type="application/octet-stream" sparkle:edSignature="/oBD4myJ6TXReOEyLoYwNst97NFDs9VGkLEIgBDYi8YwrA1QlC0QUxGuHda9Cc+pXiak7sDY1GJNZEPg4N/eBw=="/>
         </item>
     </channel>
-</rss><!-- sparkle-signatures:
-edSignature: cURkpGdkv84VmlX1DOJ2sX+DdeSEnUo5nEBIZ1ZHb/Pl8XAAAzegBfs4YHV6DuEsMkSbd+JH7AB7B/W7dwfaDA==
-length: 2248
+</rss>
+<!-- sparkle-signatures:
+edSignature: 5m9v9qLuzNPShBG0ekDxsZuK4qzR1HOsXruZzn3qbJIvLIIcwNkvlDTPJSIxvQKJunF0q/B3dEKGxNfAx3K1Dg==
+length: 3970
 -->
