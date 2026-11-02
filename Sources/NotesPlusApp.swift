@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @ObservedObject var settings:EditorSettings
-    @ObservedObject var model:NotesModel
+    @ObservedObject var model:StructuredModel
     @ObservedObject var updater:AppUpdater
     @State private var message:String?
     @State private var confirmReset=false
@@ -154,13 +154,13 @@ struct SettingsView: View {
             Divider()
             Toggle("1. + 공백  →  실제 번호 목록으로 시작",isOn:$settings.values.numberPeriod)
             Toggle("1) + 공백  →  실제 번호 목록으로 시작",isOn:$settings.values.numberParen)
-            Toggle("* + 공백  →  글머리 기호로 변환",isOn:.constant(false)).disabled(true)
-            Toggle("- + 공백  →  글머리 기호로 변환",isOn:.constant(false)).disabled(true)
-            Toggle("+ + 공백  →  글머리 기호로 변환",isOn:.constant(false)).disabled(true)
-            note("글머리·체크리스트는 기본 메모에서 편집합니다. 현재 버전에서는 *, -, +를 그대로 입력하며 번호 목록만 자동 변환합니다.")
-            Picker("변환할 글머리 기호",selection:$settings.values.bulletSymbol) { Text("• 채운 점").tag("•"); Text("◦ 빈 점").tag("◦"); Text("– 대시").tag("–") }.disabled(true)
+            Toggle("* + 공백  →  글머리 기호로 변환",isOn:$settings.values.starBullet)
+            Toggle("- + 공백  →  글머리 기호로 변환",isOn:$settings.values.dashBullet)
+            Toggle("+ + 공백  →  글머리 기호로 변환",isOn:$settings.values.plusBullet)
+            note("각 입력 기호를 따로 설정할 수 있습니다. 기본값은 번호만 자동 변환하며, *는 그대로 입력합니다.")
+            note("점 목록은 실제 글머리 목록으로, -는 실제 대시 목록으로 저장합니다.")
             Divider()
-            Toggle("글머리 기호 다음 줄도 자동으로 이어쓰기",isOn:.constant(false)).disabled(true)
+            Toggle("글머리 기호 다음 줄도 자동으로 이어쓰기",isOn:$settings.values.continueBullets)
             Toggle("빈 목록 항목에서 Return을 누르면 목록 끝내기",isOn:$settings.values.exitEmptyList)
             Toggle("새 줄에 앞줄의 공백·탭 들여쓰기 유지",isOn:$settings.values.preserveIndent)
             Toggle("Tab 키로 탭 문자 대신 공백 입력",isOn:$settings.values.tabInsertsSpaces)
@@ -222,9 +222,8 @@ struct SettingsView: View {
             Toggle("서식",isOn:$settings.values.showFormatTool)
             Toggle("체크리스트",isOn:$settings.values.showChecklistTool)
             Toggle("표",isOn:$settings.values.showTableTool)
-            Toggle("첨부파일",isOn:$settings.values.showAttachmentTool)
             Toggle("텍스트 사본 공유",isOn:$settings.values.showShareTool)
-            note("서식·체크리스트·표·첨부파일 도구는 해당 메모를 기본 메모 앱에서 엽니다.")
+            note("서식·체크리스트·표는 NotesPlus에서 편집합니다. 이미지·스캔 등 첨부 편집은 이 베타에서 지원하지 않습니다.")
         }
     }
     private var saving:some View {
@@ -233,7 +232,7 @@ struct SettingsView: View {
             decimal("연속 입력 중 저장",$settings.values.autosaveMaxInterval,range:3...30,step:1,unit:"초")
             decimal("다른 기기 변경 확인",$settings.values.syncInterval,range:2...30,step:1,unit:"초")
             Toggle("실행할 때 마지막 메모 다시 열기",isOn:$settings.values.restoreLastNote)
-            note("자동 저장은 항상 켜져 있습니다. 메모 이동·종료 시에도 저장합니다. 확인 간격은 이 앱의 조회 주기이며 iCloud 전송 속도를 바꾸지는 않습니다.")
+            note("자동 저장은 항상 켜져 있습니다. 메모를 이동하면 저장을 이어가고, 종료할 때 미전송 입력은 로컬 초안으로 보관해 다음 실행에서 전송합니다. 확인 간격은 이 앱의 조회 주기이며 iCloud 전송 속도를 바꾸지는 않습니다.")
             HStack { Text("미저장 초안과 저장 전 백업"); Spacer(); Button("보관 폴더 열기") {model.openSupportFolder()} }
         }
     }
@@ -244,7 +243,7 @@ struct SettingsView: View {
         section("Apple 기본 메모에서 관리",kind:"기본 앱 전용") {
             note("아래 옵션은 Apple 메모의 계정·보안·시스템 기능에 속합니다. NotesPlus에서 변경하는 스위치가 아니며, 기본 메모 → 설정(⌘,)에서 관리합니다.")
             managed("기본 계정", "Siri가 메모를 만들 때 사용하는 계정입니다. NotesPlus의 새 메모 위치와 별개입니다.")
-            managed("‘나의 Mac’ 계정 활성화", "기본 메모에서 활성화한 로컬 계정을 NotesPlus에서도 불러옵니다.")
+            managed("‘나의 Mac’ 계정 활성화", "Apple 메모의 로컬 계정 설정입니다. 이 베타는 개인 iCloud 계정의 메모를 불러옵니다.")
             managed("마지막 빠른 메모 다시 열기", "핫 코너·시스템 단축키로 여는 Apple 빠른 메모의 동작입니다.")
             managed("완료한 체크리스트 항목 자동 정렬", "Apple의 체크리스트 항목을 완료 시 아래로 이동합니다.")
             managed("멘션 알림 허용", "공유 메모에서 이름이 언급될 때 Apple 메모가 보내는 알림입니다.")

@@ -11,9 +11,10 @@ struct CloudParagraph: Codable, Equatable, Sendable {
 }
 struct CloudTable: Codable, Equatable, Sendable {var id:String;var grid:[[String]]}
 struct CloudDocument: Codable, Equatable, Sendable {var paragraphs:[CloudParagraph];var tables:[CloudTable]=[]}
-struct CloudSummary: Codable, Identifiable, Sendable {var id:String;var title:String;var created:Double}
-struct CloudSnapshot: Codable, Sendable {var id:String;var title:String;var tag:String;var document:CloudDocument;var created:Double}
-struct CloudListing: Codable, Sendable {var folderID:String?;var notes:[CloudSummary]}
+struct CloudFolder:Codable,Identifiable,Sendable {var id:String;var name:String;var parentID:String?;var shared:Bool;var count:Int;var account:String{"iCloud"}}
+struct CloudSummary: Codable, Identifiable, Sendable {var id:String;var title:String;var created:Double;var modified:Double?;var folderID:String?;var preview:String?;var readOnlyReason:String?}
+struct CloudSnapshot: Codable, Sendable {var id:String;var title:String;var tag:String;var document:CloudDocument;var created:Double;var modified:Double?;var folderID:String?;var readOnlyReason:String?;var backup:String?}
+struct CloudListing: Codable, Sendable {var folders:[CloudFolder];var notes:[CloudSummary]}
 struct CloudSession: Codable, Sendable {var cookie:String;var clientId:String;var clientBuildNumber:String;var clientMasteringNumber:String;var capturedAt:String}
 struct CloudAccount: Codable, Sendable {var session:CloudSession;var dsid:String;var host:String}
 struct CloudFailure: Error, Codable, LocalizedError, Sendable {var code:String;var message:String;var errorDescription:String?{message}}
@@ -70,5 +71,30 @@ actor CloudClient:CloudRequesting {
         let response=try JSONDecoder().decode(CloudResponse<T>.self,from:raw)
         if let result=response.result,response.ok{return result}
         throw response.error ?? CloudFailure(code:"RESPONSE",message:"iCloud 응답을 읽지 못했습니다.")
+    }
+}
+
+extension CloudDocument {
+    // Wire offsets and omitted default values do not change the editor. Comparing
+    // them directly used to reinstall identical text after every cloud echo.
+    func editorEquivalent(to other:CloudDocument)->Bool {
+        func canonical(_ value:CloudDocument)->CloudDocument {
+            var d=value
+            if d.paragraphs.count>1,d.paragraphs.last?.kind=="body",d.paragraphs.last?.text.isEmpty==true,d.paragraphs[d.paragraphs.count-2].kind.hasSuffix("List"),d.paragraphs[d.paragraphs.count-2].text.isEmpty {d.paragraphs.removeLast()}
+            for i in d.paragraphs.indices {
+                d.paragraphs[i].start=0
+                d.paragraphs[i].separator=i==d.paragraphs.count-1 ? "":(d.paragraphs[i].separator?.isEmpty==false ? d.paragraphs[i].separator!:"\n")
+                if d.paragraphs[i].startNumber==1{d.paragraphs[i].startNumber=0}
+                if d.paragraphs[i].kind != "todoList"{d.paragraphs[i].done=nil}
+                var spans:[CloudSpan]=[]
+                for span in d.paragraphs[i].spans where span.length>0 {
+                    if var last=spans.last {let n=last.length;last.length=span.length;if last==span{last.length=n+span.length;spans[spans.count-1]=last;continue}}
+                    spans.append(span)
+                }
+                d.paragraphs[i].spans=spans
+            }
+            return d
+        }
+        return canonical(self)==canonical(other)
     }
 }

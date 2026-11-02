@@ -6,9 +6,9 @@
 <key>CFBundleDisplayName</key><string>NotesPlus</string>
 <key>CFBundleExecutable</key><string>NotesPlus</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.7.0</string>
-<key>CFBundleVersion</key><string>7</string>
-<key>SUFeedURL</key><string>https://raw.githubusercontent.com/Recrude/NotesPlus/main/Release/appcast.xml</string>
+<key>CFBundleShortVersionString</key><string>0.8.0-beta.1</string>
+<key>CFBundleVersion</key><string>801</string>
+<key>SUFeedURL</key><string>https://raw.githubusercontent.com/Recrude/NotesPlus/feature/structured-cloud-editor/Release/beta-appcast.xml</string>
 <key>SUPublicEDKey</key><string>jRtMrq29K7l/Ti8/u6yiR/FAJ/Dpi233QSE9SbWOjtg=</string>
 <key>SUEnableAutomaticChecks</key><true/>
 <key>SUScheduledCheckInterval</key><integer>86400</integer>

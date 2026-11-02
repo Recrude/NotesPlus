@@ -1,3 +1,5 @@
+> Historical experiment record. The integrated 0.8 beta is described in README.md and BETA-VALIDATION.md.
+
 # Structured iCloud editor experiment
 
 This is a separate NotesPlus Experimental build, not the public 0.7 updater.

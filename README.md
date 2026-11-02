@@ -1,70 +1,62 @@
 # NotesPlus
 
-Mac 기본 메모와 연결하면서 글꼴, 한글 행간, 입력 동작을 조절할 수 있는 macOS 앱입니다.
+Apple 메모를 iCloud로 연결해 네이티브 편집기에서 쓰고, 행간과 입력 규칙을 조절하는 macOS 앱입니다.
 
-**Apple Silicon · macOS 26 이상 · Developer ID 서명 및 Apple 공증 없음**
+**0.8.0-beta.1 · Apple Silicon · macOS 26 이상 · Developer ID 서명 및 Apple 공증 없음**
 
-[DMG 다운로드](https://github.com/Recrude/NotesPlus/releases/download/v0.7.0/NotesPlus-0.7.0-macOS-arm64.dmg) · [릴리스 및 체크섬](https://github.com/Recrude/NotesPlus/releases/tag/v0.7.0)
+[0.8 베타 DMG](https://github.com/Recrude/NotesPlus/releases/download/v0.8.0-beta.1/NotesPlus-0.8.0-beta.1-macOS-arm64.dmg) · [릴리스 및 체크섬](https://github.com/Recrude/NotesPlus/releases/tag/v0.8.0-beta.1) · [0.7 안정 버전](https://github.com/Recrude/NotesPlus/releases/tag/v0.7.0)
 
 ## 설치
 
-1. DMG를 열고 `NotesPlus.app`을 `Applications` 폴더로 옮깁니다.
-2. 응용 프로그램 폴더에서 NotesPlus를 실행합니다.
-3. 첫 연결 때 기본 메모에 대한 자동화 권한을 허용합니다. iCloud 메모는 Mac 기본 메모에서 먼저 연결되어 있어야 합니다.
+기존 NotesPlus를 종료한 뒤 DMG의 앱을 Applications 폴더로 옮겨 교체합니다. 기존 설정과 로컬 초안은 삭제하지 않습니다. 0.8의 첫 연결은 앱의 Apple 로그인 페이지에서 직접 완료합니다. 비밀번호를 NotesPlus 자체 입력창으로 받지 않습니다.
 
-기존 버전을 사용 중이라면 앱을 종료하고 교체합니다. 기존 메모와 설정은 유지됩니다.
+미확인 개발자 경고가 나오면 앱을 한 번 실행한 후 **시스템 설정 → 개인정보 보호 및 보안 → NotesPlus의 ‘그래도 열기’**에서 확인합니다. 시스템 전체 보안 설정이나 SIP를 변경할 필요는 없습니다. [Apple의 앱 열기 안내](https://support.apple.com/ko-kr/102445)
 
-### 앱 내 업데이트
+설치·연결·보안 경고·이전 초안에 대한 자세한 설명은 DMG에 포함된 [READ-ME.txt](Release/READ-ME.txt)를 확인하세요.
 
-0.7부터 **NotesPlus 메뉴 → 업데이트 확인…** 또는 **설정 하단 → 업데이트 확인…**에서 변경 내용을 확인하고 설치합니다. 다운로드·서명 검증 후 앱을 교체하고 다시 실행합니다. 설치된 앱을 삭제할 필요가 없으며 메모·초안·설정은 유지됩니다. 설정 하단과 앱 정보에서 현재 버전과 빌드 번호를 확인할 수 있습니다.
+## 0.8 베타
 
-하루에 한 번 새 버전 소식을 확인하며 설정의 ‘새 버전 소식 자동 확인’에서 끌 수 있습니다. 설치는 사용자가 선택한 뒤 진행합니다. 미저장 내용이 있으면 기존 종료 절차로 저장하거나 초안을 보관하며, 종료를 취소할 수 있습니다.
+- 기존 개인 iCloud 폴더와 메모를 읽고, 본문·체크리스트·글머리·번호 목록을 편집합니다.
+- 실제 표를 만들고 셀과 행·열을 편집합니다. 체크 상태와 표 구조가 Apple 메모에 반영됩니다.
+- 입력과 저장을 분리합니다. 한글 조합 보호, 문서 읽기 묶음 처리, 메모별 저장 상태, 전체 초안 복원을 포함합니다.
+- 저장 전 원본 구조를 로컬에 백업하고, 그 버전과 일치할 때만 업로드합니다. 일시적인 버전 경쟁은 재시도하고 실제 동시 편집 충돌은 양쪽 버전을 보관합니다.
+- 기존 설정창, 기본 행간 1.6, 기호별 목록 자동화, 타임스탬프와 생성일 정렬을 통합했습니다.
 
-**0.6에는 업데이트 기능이 없으므로 0.7 앱으로 한 번 덮어써야 합니다.** 이후부터 앱 내 업데이트를 사용합니다. DMG 안에서 실행하지 말고 Applications 폴더로 먼저 옮기세요.
+⌃⌘T로 타임스탬프를 삽입합니다. 기본 형식은 `yyyy/MM/dd HH:mm`이며 설정에서 형식과 단축키를 바꿀 수 있습니다. `1.` / `1)` 자동 목록과 `*` / `-` / `+` 자동 목록은 각각 설정합니다. 기본값은 번호만 자동 변환합니다.
 
-### 첫 실행 보안 경고
+글꼴·크기·행간·여백은 NotesPlus의 표시 설정입니다. iPhone의 표시 설정을 바꾸지 않습니다.
 
-현재 버전은 Apple 공증을 받지 않았습니다. 이 저장소의 Releases에서 내려받은 파일인지 확인하세요.
+## 보존 범위와 한계
 
-개발자를 확인할 수 없거나 Apple이 악성 소프트웨어를 확인할 수 없다는 경고가 나오면, 앱을 한 번 실행한 뒤 **시스템 설정 → 개인정보 보호 및 보안 → NotesPlus의 ‘그래도 열기’ → ‘열기’**를 선택합니다. 요청되면 Mac 암호 또는 Touch ID로 확인합니다. 이후에는 평소처럼 실행할 수 있습니다. [Apple 공식 안내](https://support.apple.com/ko-kr/102445)
+이 연결은 Apple이 공개한 Notes API가 아니며, Apple의 비공개 문서 형식에 의존합니다. 모든 메모 유형과 미래 OS 버전의 호환성을 보장하지 않습니다.
 
-‘컴퓨터를 손상시킵니다’ 또는 ‘앱이 손상되었습니다’라는 경고는 별도로 확인해야 합니다. 다시 다운로드하고 릴리스의 SHA-256 값을 확인하거나 [Issues](https://github.com/Recrude/NotesPlus/issues)에 알려 주세요. [상세 설치 안내](Release/READ-ME.txt)
+잠금·공유·이미지/스캔 첨부·대용량 자산 본문, 표현할 수 없는 색상/강조/사용자 서체, 표 셀 안의 복합 서식은 편집하지 않습니다. 읽기 전용 화면은 텍스트 미리보기입니다. Gmail·나의 Mac 계정과 다른 사람이 공유한 별도 영역은 현재 대상이 아닙니다.
 
-## 기능
+표 전체의 이동·삭제, 표 셀의 인라인 서식 변경은 미지원입니다. 표 구조 변경은 먼저 현재 입력이 저장된 뒤 실행합니다. 서로 다른 구조를 동시에 변경하면 저장을 거부하고 전체 초안을 유지할 수 있습니다.
 
-- 글꼴·크기·행간·자간·문단 간격·본문 여백 설정. 기본 행간은 1.6배입니다.
-- 입력과 저장 분리: 입력이 멈춘 뒤 기본 1.2초, 연속 입력 중 약 8초마다 자동 저장합니다.
-- `1. `로 실제 번호 목록을 시작하고 Return으로 이어 작성합니다. `* `는 문자 그대로 남깁니다.
-- `⌘⌃T`로 현재 커서 위치에 타임스탬프를 삽입합니다. 형식과 단축키를 설정에서 바꿀 수 있습니다.
-- 날짜 형식 `yyyy/MM/dd HH:mm`, `yyyyMMdd HHmmss` 등을 지원합니다.
-- 생성일 기준 최신 메모 먼저 정렬합니다. 수정일 또는 제목으로 바꿀 수도 있습니다.
-- Mac 기본 메모에 도착한 새 메모와 변경 사항을 기본 3초 간격으로 확인합니다.
+초안·원본 백업·충돌 사본은 `~/Library/Application Support/NotesPlus/Structured/`에 사용자 전용 파일 권한으로 저장합니다. 별도 암호화·자동 정리는 없습니다. 0.7과 실험판의 초안을 자동으로 변환하거나 업로드하지 않으며 기존 보관 위치에 유지합니다.
 
-`⌘,`로 설정을 엽니다. 전체 옵션은 [SETTINGS.txt](SETTINGS.txt)를 참고하세요.
+## 업데이트
 
-## 메모와 동기화
+설정 하단과 앱 정보에서 버전·빌드를 확인합니다. **NotesPlus → 업데이트 확인…**으로 다음 베타를 설치하며 앱만 교체하므로 삭제 후 재설치할 필요가 없습니다.
 
-NotesPlus는 공개 Apple Events / Scripting Bridge로 Mac 기본 메모를 읽고 저장합니다. 기기 간 iCloud 동기화는 Apple 메모가 처리합니다. 별도 Apple 계정 암호를 받거나 별도 클라우드 저장소를 만들지 않습니다.
+0.7 안정 채널에는 베타를 자동으로 배포하지 않습니다. 첫 베타 설치는 DMG로 교체하고, 이후 베타는 별도로 서명된 베타 업데이트 피드를 사용합니다. 업데이트 파일과 피드의 Ed25519 검증은 Apple 공증과 별개입니다.
 
-번호 목록을 iPhone 기본 메모에서 이어 작성하고, 그 내용이 NotesPlus로 돌아오는 것을 확인했습니다. 글꼴·행간 설정은 이 Mac의 NotesPlus에만 적용됩니다.
-
-일반 텍스트, 단순 제목, 지원되는 번호 목록을 편집합니다. **글머리·체크리스트, 복잡한 서식, 표·첨부, 공유·잠긴 메모는 읽기 전용**입니다. 두 기기의 동시 수정은 자동 병합하지 않습니다. 충돌 시 작성 중인 내용을 유지하고 ‘두 버전 확인’에서 비교·선택하며, 선택 전에 양쪽 내용을 `Recovered` 폴더에 보관합니다.
-
-0.7은 저장 확인 지연과 이전 저장본 재등장 처리를 보강하고, 최근 저장 기록을 Mac에 유지합니다. 공개 자동화 API에는 원자적인 비교 후 저장 기능이 없어 다른 기기의 완전히 동시적인 편집까지 보장하는 구조는 아닙니다.
-
-로컬 초안과 백업은 `~/Library/Application Support/NotesPlus/`에 보관합니다. 별도 암호화나 자동 정리 기능은 없습니다. Apple Notes의 모든 기능을 제공하는 앱은 아니며 Apple의 공식 제품이 아닙니다.
-
-## 빌드 및 패키징
-
-Apple Silicon Mac과 macOS 26 SDK가 포함된 Xcode Command Line Tools가 필요합니다.
+## 개발
 
 ```sh
+cd CloudBridge
+npm ci --ignore-scripts
+cd ..
+bash Tools/test-structured.sh
 bash build.sh
 bash package.sh
 ```
 
-앱과 배포 파일은 저장소의 상위 디렉터리 `outputs/`에 생성됩니다. 기본 빌드는 로컬 ad-hoc 서명을 사용하며 Developer ID 인증서나 공증 자격 증명이 필요하지 않습니다. 서식·저장·입력·설정 관련 141개 검사를 포함합니다.
+`NOTESPLUS_APP_PATH`로 빌드 앱 경로를 지정할 수 있습니다. 기본 산출물은 상위 `outputs/`입니다. Node 22.23.4 arm64와 Sparkle 2.10.1 공식 배포물을 고정 SHA-256으로 검증해 번들에 포함합니다. 앱의 네트워크 연결은 Apple iCloud와 GitHub의 업데이트 배포 경로를 사용합니다.
 
-업데이트는 [Sparkle](https://sparkle-project.org/) 2.10.1을 사용합니다. 빌드 시 공식 배포 파일을 고정된 SHA-256으로 검증한 뒤 사용하며 라이선스를 앱에 포함합니다. 배포자의 업데이트 서명키는 Mac 키체인에만 보관하고 공개키만 소스에 포함합니다. 이는 Apple 공증과 별개이며 유료 개발자 계정이 필요하지 않습니다.
+새 편집기와 연결 코드는 `Sources/Structured/`, `CloudBridge/src/`에 있습니다. 이전 HTML 자동화 구현은 회귀·참조용 소스로 남아 있지만 0.8 앱에 컴파일되지 않습니다.
 
-[배포 절차](Release/DISTRIBUTION.txt) · [개발 기록](README.txt)
+[검증 기록](BETA-VALIDATION.md) · [앞선 구조 동기화 실험](STRUCTURED-EXPERIMENT.md)
+
+필요한 wire codec/CRDT 코드는 [icloud-md](https://github.com/coddingtonbear/icloud-md)의 MIT 라이선스 소스를 고정 커밋으로 포함합니다. 변경 내역은 [UPSTREAM.md](CloudBridge/vendor/icloud-md/UPSTREAM.md)에 기록합니다. Node·Sparkle·의존성 라이선스는 앱에 포함됩니다.

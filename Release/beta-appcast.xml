@@ -1,0 +1,30 @@
+<?xml version="1.0" standalone="yes"?><!-- sparkle-sign-warning:
+IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
+--><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>NotesPlus</title>
+        <item>
+            <title>0.8.0-beta.1</title>
+            <pubDate>Mon, 02 Nov 2026 17:13:03 +0900</pubDate>
+            <link>https://github.com/Recrude/NotesPlus/releases/tag/v0.8.0-beta.1</link>
+            <sparkle:version>801</sparkle:version>
+            <sparkle:shortVersionString>0.8.0-beta.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h2>NotesPlus 0.8 베타 1</h2>
+<p>체크리스트·글머리·표를 NotesPlus 안에서 편집하고 iCloud에 구조를 보존해 저장하는 새 편집기를 통합했습니다.</p>
+<ul>
+<li>기존 개인 iCloud 폴더, 실제 체크 상태, 번호 목록, 표 삽입과 기본 행·열 편집.</li>
+<li>입력과 저장 분리, 한글 조합 보호, 메모별 저장 상태, 원본 백업과 일시적인 버전 충돌 재시도.</li>
+<li>기존 설정, 타임스탬프, 생성일 정렬, 베타 채널 업데이트 통합.</li>
+</ul>
+<p>0.7에서 처음 전환할 때 Apple 페이지에서 iCloud 연결이 필요합니다. 잠금·공유·이미지 첨부·지원하지 않는 복합 서식 등은 편집하지 않습니다. 표 전체 이동·삭제와 표 셀의 인라인 서식 변경은 미지원입니다.</p>
+<p>Developer ID 서명 및 Apple 공증 없음. 설치 방법과 범위는 DMG의 READ-ME.txt를 확인하세요.</p>
+]]></description>
+            <enclosure url="https://github.com/Recrude/NotesPlus/releases/download/v0.8.0-beta.1/NotesPlus-0.8.0-beta.1-macOS-arm64.zip" length="39108165" type="application/octet-stream" sparkle:edSignature="/oBD4myJ6TXReOEyLoYwNst97NFDs9VGkLEIgBDYi8YwrA1QlC0QUxGuHda9Cc+pXiak7sDY1GJNZEPg4N/eBw=="></enclosure>
+        </item>
+    </channel>
+</rss><!-- sparkle-signatures:
+edSignature: cURkpGdkv84VmlX1DOJ2sX+DdeSEnUo5nEBIZ1ZHb/Pl8XAAAzegBfs4YHV6DuEsMkSbd+JH7AB7B/W7dwfaDA==
+length: 2248
+-->

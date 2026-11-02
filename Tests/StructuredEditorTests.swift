@@ -40,6 +40,9 @@ import AppKit
         let second=(typing.string as NSString).paragraphRange(for:NSRange(location:(typing.string as NSString).length,length:0))
         let marker=typing.textStorage!.attribute(.attachment,at:second.location,effectiveRange:nil) as! NSTextAttachment
         precondition((marker.attachmentCell as! ListMarkerCell).number==2,"Visible numbering increments")
+        typing.insertNewline(nil);typing.insertNewline(nil);typing.insertText("2026/11/02 16:45",replacementRange:typing.selectedRange())
+        let exited=StructuredCodec.capture(typing)
+        precondition(exited.paragraphs.last?.kind=="body" && exited.paragraphs.last?.text=="2026/11/02 16:45","Empty-list exit resets typing attributes before timestamp or new body")
         typing.textStorage!.setAttributedString(NSAttributedString(string:"",attributes:StructuredCodec.attributes(CloudParagraph(),size:17,ratio:1.6)));typing.setSelectedRange(NSRange(location:0,length:0));typing.typingAttributes=StructuredCodec.attributes(CloudParagraph(),size:17,ratio:1.6)
         typing.insertText("*",replacementRange:typing.selectedRange());typing.insertText(" ",replacementRange:typing.selectedRange())
         precondition(typing.string=="* " && StructuredCodec.capture(typing).paragraphs[0].kind=="body","Star-space stays literal")

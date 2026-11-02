@@ -37,7 +37,7 @@ actor DelayedCloud:CloudRequesting {
         await backend.setRemote(base);await model.refresh()
         precondition(model.document==latest,"Old readback must not replace an acknowledged save")
         var phone=committed;phone.tag="phone-1";phone.document.paragraphs.append(CloudParagraph(text:"iPhone에서 추가"))
-        await backend.setRemote(phone);await model.refresh();precondition(model.document==phone.document,"New remote edit installs while idle")
+        try await Task.sleep(for:.seconds(3.1));await backend.setRemote(phone);await model.refresh();precondition(model.document==phone.document,"New remote edit installs while idle")
         var continued=phone.document;continued.paragraphs.append(CloudParagraph(text:"NotesPlus에서 이어서 입력"));model.edited(continued)
         await backend.setFailure(true);await model.save()
         precondition(model.dirty && model.document==continued,"Conflict must retain editable complete draft")

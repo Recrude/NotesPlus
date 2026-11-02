@@ -1,3 +1,7 @@
+import {attachAt} from './tableCreate.js';
+import {type AttributeRun} from '../vendor/icloud-md/src/notes/gen/topotext_pb.js';
+import {resolveTable} from '../vendor/icloud-md/src/notes/decodeTableRecord.js';
+import {parseCellDocument} from '../vendor/icloud-md/src/notes/tableCellEdit.js';
 import { diff3Merge } from 'node-diff3';
 import { applyTextEdit, buildInitialNoteDocument, computeSplices, encodeNoteDocument, noteDocumentRoundTrips, parseNoteDocument, validateDocumentInvariants } from '../vendor/icloud-md/src/notes/noteDocument.js';
 import { compressNoteDocument, decompressNoteDocument } from '../vendor/icloud-md/src/notes/noteText.js';
@@ -27,21 +31,34 @@ export function layout(input: Document): {text: string; paragraphs: Paragraph[]}
   });
   return {text, paragraphs};
 }
+function requireSupportedStyles(runs:readonly AttributeRun[],inCell=false) {
+  for(const run of runs) {
+    const expectedFont=run.fontHints===3?'SFUIText-BoldItalic':run.fontHints===1?'SFUIText-Bold':run.fontHints===2?'SFUIText-LightItalic':undefined;
+    const customFont=run.font && (run.font.name!==expectedFont || run.font.pointSize!==0 || run.font.fontHints!==0 || run.font.$unknown?.length);
+    if(customFont || run.color || run.superscript || run.emphasis || run.systemAttachmentInfo || run.writingDirection>1 || (run.fontHints & ~3) || run.underline>1 || run.strikethrough>1 || run.$unknown?.length)throw new Error('색상·강조·사용자 서체 등 아직 표시를 보존할 수 없는 서식이 있어 읽기 전용입니다.');
+    const p=run.paragraphStyle;
+    if(p && (p.alignment!==0 && p.alignment!==4 || p.writingDirection>1 || p.paragraphHints || p.$unknown?.length))throw new Error('문단 정렬·방향 등 지원하지 않는 서식이 있어 읽기 전용입니다.');
+    if(inCell && (run.attachmentInfo || run.fontHints || run.underline || run.strikethrough || run.link || p && (p.style!==0 && p.style!==3 || p.todo || p.indent || p.blockQuoteLevel)))throw new Error('표 셀 안의 복합 서식은 이 베타에서 읽기 전용입니다.');
+  }
+}
 export function decode(body: string, attachments: CloudKitRecord[]): Document {
   const compressed = Buffer.from(body, 'base64');
   const raw = decompressNoteDocument(compressed);
   if (!noteDocumentRoundTrips(raw)) throw new Error('이 메모의 원본 구조를 완전히 보존할 수 없습니다.');
-  const doc = parseNoteDocument(raw), format = decodeNoteFormat(doc.text, doc.attributeRuns);
+  const doc = parseNoteDocument(raw);requireSupportedStyles(doc.attributeRuns);
+  const format = decodeNoteFormat(doc.text, doc.attributeRuns);
   if (format.status !== 'ok') throw new Error(format.reason);
   const slots = decodeNoteEmbedSlots(compressed);
   if (!slots) throw new Error('첨부 데이터 구조를 확인할 수 없습니다.');
   const tables: Document['tables'] = [];
   for (const slot of slots) {
-    if (slot.kind !== 'attachment' || slot.ref.typeUti !== 'com.apple.notes.table') throw new Error('이 실험 빌드는 표 이외의 첨부 편집을 아직 지원하지 않습니다.');
+    if (slot.kind !== 'attachment' || slot.ref.typeUti !== 'com.apple.notes.table') throw new Error('이미지·스캔 등 표 이외의 첨부가 있는 메모는 원본 보존을 위해 읽기 전용입니다.');
     const record = attachments.find(r => r.recordName === slot.ref.attachmentIdentifier);
     const data = record?.fields.MergeableDataEncrypted?.value;
     if (typeof data !== 'string' || !tableDocumentRoundTrips(Buffer.from(data, 'base64'))) throw new Error('표 원본을 완전히 읽지 못했습니다.');
-    tables.push({id: slot.ref.attachmentIdentifier, grid: gridFromTableDocument(parseTableDocument(Buffer.from(data, 'base64')))});
+    const tableDoc=parseTableDocument(Buffer.from(data,'base64'));
+    for(const cell of resolveTable(tableDoc).cells.values()){const str=tableDoc.objects[cell.textRef]?.string;if(str)requireSupportedStyles(parseCellDocument(str).attributeRuns,true);}
+    tables.push({id: slot.ref.attachmentIdentifier, grid: gridFromTableDocument(tableDoc)});
   }
   let table = 0;
   const separators = [...doc.text.matchAll(/\r\n?|\n/g)].map(m => m[0]);
@@ -61,19 +78,24 @@ export function encodeCreate(input: Document, replica: Uint8Array): string {
 export function encodeEdit(body: string, input: Document, replica: Uint8Array): string {
   const raw = decompressNoteDocument(Buffer.from(body, 'base64'));
   if (!noteDocumentRoundTrips(raw)) throw new Error('Original document failed preservation check');
-  const doc = parseNoteDocument(raw), desired = layout(input);
+  const doc = parseNoteDocument(raw), desired = layout(input);requireSupportedStyles(doc.attributeRuns);
   const slots = decodeNoteEmbedSlots(Buffer.from(body, 'base64'));
   for (const s of computeSplices(doc.text, desired.text)) {
-    if (doc.text.slice(s.start, s.start + s.deleteLength).includes('\uFFFC') || s.insertText.includes('\uFFFC')) throw new Error('표 이동·삭제는 이 실험 빌드에서 아직 지원하지 않습니다.');
+    if (doc.text.slice(s.start, s.start + s.deleteLength).includes('\uFFFC')) throw new Error('표 전체 이동·삭제는 원본 보존을 위해 아직 지원하지 않습니다.');
   }
+  const oldIDs=(slots || []).map(s=>s.kind==='attachment'?s.ref.attachmentIdentifier:'');
+  const desiredIDs=desired.paragraphs.flatMap(p=>p.tableID?[p.tableID]:[]);
+  if(JSON.stringify(desiredIDs.filter(id=>oldIDs.includes(id)))!==JSON.stringify(oldIDs))throw new Error('기존 표의 순서와 식별자가 바뀌었습니다.');
+  if(new Set(desiredIDs).size!==desiredIDs.length || input.tables.length!==desiredIDs.length || !input.tables.every(t=>desiredIDs.includes(t.id)))throw new Error('표 식별자가 중복되었거나 누락됐습니다.');
   applyTextEdit(doc, desired.text, {replicaId: replica});
+  for(const p of desired.paragraphs){if(p.tableID && !oldIDs.includes(p.tableID)){if(p.text!=='\ufffc')throw new Error('표 문단이 잘못되었습니다.');attachAt(doc,p.start,p.tableID)}}
   const result = reconcileNoteFormat(doc, desired.paragraphs, replica);
   if (!result.ok) throw new Error(result.reason);
   validateDocumentInvariants(doc);
   const encoded = encodeNoteDocument(doc);
   if (!noteDocumentRoundTrips(encoded)) throw new Error('Edited document failed preservation check');
   const bytes = compressNoteDocument(encoded);
-  if (JSON.stringify(decodeNoteEmbedSlots(bytes)) !== JSON.stringify(slots)) throw new Error('Attachment identity changed');
+  if (JSON.stringify(decodeNoteEmbedSlots(bytes)?.map(s=>s.kind==='attachment'?s.ref.attachmentIdentifier:'')) !== JSON.stringify(desiredIDs)) throw new Error('Attachment identity changed');
   const check = decodeNoteFormat(doc.text, parseNoteDocument(encoded).attributeRuns);
   if (check.status !== 'ok' || JSON.stringify(canonicalParagraphs(check.paragraphs)) !== JSON.stringify(canonicalParagraphs(desired.paragraphs))) throw new Error('저장 검증 중 본문 서식이 달라졌습니다. 초안을 보관합니다.');
   return bytes.toString('base64');

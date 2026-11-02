@@ -21,7 +21,7 @@ struct Preferences: Codable, Equatable {
     var verticalPadding = 5.0
     var readableWidth = 0.0
     var tabWidth = 4
-    // Number triggers create structural lists. Legacy bullet preferences stay inert.
+    // Each trigger can independently create a structural list.
     var numberPeriod = true
     var numberParen = true
     var starBullet = false
@@ -179,8 +179,11 @@ struct Preferences: Codable, Equatable {
         return p
     }
     var colorScheme:ColorScheme? { self.appearance=="system" ? nil : (self.appearance=="dark" ? .dark : .light) }
+
+#if !STRUCTURED_APP
     var newNoteProfile:EditingProfile {
         let tag=["title":"h1","heading":"h2","subheading":"h3"][self.newNoteStyle]
         return EditingProfile(titleTemplate:tag.map { "<div><\($0)>\(NoteCodec.titleToken)</\($0)></div>" })
     }
+#endif
 }

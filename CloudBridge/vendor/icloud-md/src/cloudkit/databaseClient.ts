@@ -1103,7 +1103,8 @@ export interface RecordUpdate {
    * (the table's own `MergeableDataEncrypted`) atomically in one call. */
   recordType: string;
   /** Optimistic-concurrency token; see `NoteUpdate`. */
-  recordChangeTag: string;
+  recordChangeTag?: string;
+  operationType?: "create" | "update";
   fields: Record<string, { value: unknown }>;
   parentRecordName?: string | undefined;
 }
@@ -1141,7 +1142,8 @@ export async function updateRecords(
     if (update.parentRecordName !== undefined) {
       record.parent = { recordName: update.parentRecordName };
     }
-    return { operationType: "update", record };
+    if (update.operationType !== "create" && !update.recordChangeTag) throw new Error("Conditional update requires a change tag");
+    return { operationType: update.operationType ?? "update", record };
   });
 
   const body = await postDatabase(
