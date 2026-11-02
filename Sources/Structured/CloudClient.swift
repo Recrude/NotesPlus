@@ -1,16 +1,21 @@
 import Foundation
 import Security
 
+struct CloudRichStyle:Codable,Equatable,Sendable {var token:String;var fontName:String?;var fontSize:Double?;var color:[Double]?;var superscript:Int?;var emphasis:Int?;var protected:Bool?}
+struct CloudParagraphStyle:Codable,Equatable,Sendable {var token:String;var alignment:Int;var direction:Int}
+struct CloudEmbed:Codable,Equatable,Sendable {var id:String;var uti:String;var title:String}
 struct CloudSpan: Codable, Equatable, Sendable {
-    var length:Int; var bold=false; var italic=false; var underline=false; var strikethrough=false; var link=""
+    var length:Int; var bold=false; var italic=false; var underline=false; var strikethrough=false; var link="";var style:CloudRichStyle?;var embed:CloudEmbed?
 }
 struct CloudParagraph: Codable, Equatable, Sendable {
     var kind="body"; var text=""; var start=0; var indent=0; var blockQuoteLevel=0; var startNumber=0
+    var paragraphStyle:CloudParagraphStyle?;var separatorStyle:CloudRichStyle?
     var done:Bool?; var spans:[CloudSpan]=[]; var tableID:String?; var separator:String?="\n"
     init(text:String="",kind:String="body") {self.text=text;self.kind=kind;spans=text.isEmpty ? [] : [CloudSpan(length:(text as NSString).length)]}
 }
-struct CloudTable: Codable, Equatable, Sendable {var id:String;var grid:[[String]]}
+struct CloudTable: Codable, Equatable, Sendable {var id:String;var grid:[[String]];var protected:Bool?}
 struct CloudDocument: Codable, Equatable, Sendable {var paragraphs:[CloudParagraph];var tables:[CloudTable]=[]}
+struct CloudPreview:Codable,Sendable {var data:String?}
 struct CloudFolder:Codable,Identifiable,Sendable {var id:String;var name:String;var parentID:String?;var shared:Bool;var count:Int;var account:String{"iCloud"}}
 struct CloudSummary: Codable, Identifiable, Sendable {var id:String;var title:String;var created:Double;var modified:Double?;var folderID:String?;var preview:String?;var readOnlyReason:String?}
 struct CloudSnapshot: Codable, Sendable {var id:String;var title:String;var tag:String;var document:CloudDocument;var created:Double;var modified:Double?;var folderID:String?;var readOnlyReason:String?;var backup:String?}

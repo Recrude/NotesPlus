@@ -1,5 +1,49 @@
 # 0.8 beta validation — 2026-11-02
 
+## 0.8.0-beta.2 / 802 — rich-note preservation
+
+83 TypeScript tests, strict type checks, native editor/sync/beta/rich tests and
+a TypeScript → AppKit → protobuf roundtrip passed. The 24,000-unit / 200-insert
+input microbenchmark measured p95 0.13–0.24 ms, max 0.31–0.33 ms with one coalesced capture.
+This measures an unattached text view, not system-wide frame time.
+
+Synthetic checks cover custom font/color/emphasis, paragraph alignment, exact
+attachment protobuf bytes, attachment deletion/replacement refusal, opaque
+field protection, rich-table/body separation and cookie-free bounded previews.
+
+Live tests used two newly created notes only, in `NotesPlus 실험`:
+`NotesPlus 이미지 서식 검증 1102` and `NotesPlus 원본 보존 재검증 1102`.
+The first uncovered a writer defect inherited from the pinned body codec:
+registering a lower UUID by appending made native Notes resolve old character
+coordinates to the wrong author and duplicate the body. The table codec already
+implemented the required sorted registration rule. The body writer now inserts
+at sorted rank and remaps all character/style coordinates; tests cover lower,
+middle and higher UUID joins. Malformed source ordering is refused. The initial
+test note is retained for diagnosis; no personal note was edited or repaired.
+
+The second note was created in native Notes with an image, purple emphasis,
+bold text, a link, bullets, a checklist and a 2×2 table. NotesPlus inserted text
+after the image. Native Notes preserved the full body, image, highlight, list
+and table, with no duplication. A native table-cell edit returned to NotesPlus.
+iPhone displayed the same mixed content; changing its checkbox returned to
+NotesPlus, and a subsequent NotesPlus body edit appeared on iPhone with the
+image and formatting intact. The source attachment and unchanged table records
+are not uploaded by a body-only save. Existing malformed/duplicated notes are
+not automatically rewritten or deduplicated.
+
+Image previews decode off the main thread and a bounded memory cache retains
+previews across text/check-state refreshes. Preview failure falls back to an
+attachment placeholder; it never changes the underlying attachment.
+
+The beta.2 DMG passed mount/read-only integrity checks. Its version 802, strict
+recursive code signature, executable and bridge bytes matched the built app.
+The ZIP allowlist and artifact SHA256 manifest passed. The signed beta feed
+contains 802 and 801; the stable feed was not changed. The app About panel
+displayed 0.8.0-beta.2 (802).
+
+The following sections record beta.1 and remain historical validation.
+
+
 The main NotesPlus target now uses the structured AppKit editor and CloudKit
 bridge. Bundle identity and preferences remain `dev.notesplus.prototype`.
 The 0.7 HTML/Apple Events writer is not compiled into this app.

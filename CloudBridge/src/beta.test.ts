@@ -32,8 +32,8 @@ test('catalog includes existing nested notes but excludes trash and protects sha
  assert.throws(()=>assertWritableRecord(notes[1]!));assert.throws(()=>assertWritableRecord(record('asset','Note',{TextDataAsset:{asset:'large'},TextDataEncrypted:'body'})));
 });
 
-test('unrepresented color is protected before any upload can be prepared',()=>{
+test('existing color is editable and round trips without losing rich fields',()=>{
  const original=encodeCreate({paragraphs:[plain('색상 있는 기존 메모')],tables:[]},replica);
  const doc=parseNoteDocument(decompressNoteDocument(Buffer.from(original,'base64')));doc.attributeRuns[0]!.color=create(ColorSchema,{red:1,green:0,blue:0,alpha:1});
- const colored=compressNoteDocument(encodeNoteDocument(doc)).toString('base64');assert.throws(()=>decode(colored,[]),/읽기 전용/);assert.throws(()=>encodeEdit(colored,{paragraphs:[plain('replacement')],tables:[]},replica),/읽기 전용/);
+ const colored=compressNoteDocument(encodeNoteDocument(doc)).toString('base64');const loaded=decode(colored,[]);assert.ok(loaded.paragraphs[0]!.spans[0]!.style);assert.equal(encodeEdit(colored,loaded,replica),colored);loaded.paragraphs[0]!.text+=' 추가';loaded.paragraphs[0]!.spans[0]!.length+=3;const edited=decode(encodeEdit(colored,loaded,replica),[]);assert.deepEqual(edited.paragraphs[0]!.spans[0]!.style,loaded.paragraphs[0]!.spans[0]!.style);
 });

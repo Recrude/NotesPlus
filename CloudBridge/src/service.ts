@@ -1,3 +1,4 @@
+import {imagePreview} from './preview.js';
 import {newTable,tableFields} from './tableCreate.js';
 import {catalog, parentID, active, textField, assertWritableRecord} from './policy.js';
 import {decompressNoteDocument} from '../vendor/icloud-md/src/notes/noteText.js';
@@ -6,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { checkAuthentication } from '../vendor/icloud-md/src/cloudkit/setupClient.js';
 import { fetchAllZoneRecords, lookupRecords, createNoteRecord, updateRecords, type CloudKitRecord } from '../vendor/icloud-md/src/cloudkit/databaseClient.js';
 import { buildNoteCreateFields, buildNoteUpdateFields } from '../vendor/icloud-md/src/notes/encodeNoteRecord.js';
-import { decodeNoteEmbedSlots } from '../vendor/icloud-md/src/notes/noteAttachments.js';
+import { decodeNoteEmbedSlots,isImageUti,parseAssetField } from '../vendor/icloud-md/src/notes/noteAttachments.js';
 import { decode, encodeCreate, encodeEdit, editTable, merge, layout, plain, type Document } from './document.js';
 
 const zone = {zoneName: 'Notes'};
@@ -65,6 +66,15 @@ async function main(q:any) {
     return catalog(records);
   }
   if(q.command==='read') return snapshot(await read(q.id));
+  if(q.command==='preview') {
+    const current=await read(q.id,true),slot=current.document.paragraphs.flatMap(p=>p.spans).find(s=>s.embed?.id===q.attachmentID)?.embed;
+    if(!slot || !isImageUti(slot.uti))return {};
+    const attachment=current.attachments.find(r=>r.recordName===slot.id),mediaID=(attachment?.fields.Media?.value as any)?.recordName;
+    if(typeof mediaID!=='string')return {};
+    const media=(await lookup([mediaID]))[0];if(media?.recordType!=='Media')return {};
+    const asset=parseAssetField(media.fields.Asset);if(!asset)return {};
+    return {data:await imagePreview(asset.downloadURL)};
+  }
   const replica=Buffer.from(q.replica.replaceAll('-',''),'hex');
   if(replica.length!==16) throw new Error('Invalid editor replica');
   if(q.command==='create') {
@@ -92,8 +102,9 @@ async function main(q:any) {
       }
       if(!record.recordChangeTag)throw new Error('표의 최신 버전을 읽을 수 없습니다.');
       const data=editTable(record,table.grid,replica);
-      // Even an untouched table participates in the atomic change-tag check.
-      // A concurrent cell edit must fail the batch, never leave a mixed snapshot.
+      if(data===undefined)continue;
+      // Only edited tables are uploaded; opaque attachments and unchanged rich
+      // tables keep all fields and bytes untouched. Changed tables are conditional.
       updates.push({recordName:record.recordName,recordType:record.recordType,recordChangeTag:record.recordChangeTag,fields:{MergeableDataEncrypted:{value:data ?? record.fields.MergeableDataEncrypted!.value}}});
     }
     const results=await updateRecords(session,host,dsid,'private',zone,updates);
@@ -102,7 +113,7 @@ async function main(q:any) {
     }
     // Use the acknowledged record as the base. A lagging read must not overwrite this document.
     const applied=results.flatMap(r=>r.ok?[r.record]:[]);
-    return {id:q.id,title:desired.paragraphs[0]?.text || '',tag:version(applied[0]!,applied.slice(1)),document:desired,created:current.record.fields.CreationDate?.value || 0,modified:Date.now(),folderID:parent(current.record)};
+    return {id:q.id,title:desired.paragraphs[0]?.text || '',tag:version(applied[0]!,[...applied.slice(1),...current.attachments.filter(a=>!applied.some(r=>r.recordName===a.recordName))]),document:desired,created:current.record.fields.CreationDate?.value || 0,modified:Date.now(),folderID:parent(current.record)};
   }
   throw new Error('Unknown command');
 }

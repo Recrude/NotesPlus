@@ -74,6 +74,12 @@ final class StructuredJournal:@unchecked Sendable {
         self.client=client;self.account=account;self.connected=account != nil;self.settings=settings ?? EditorSettings()
         self.support=support ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("NotesPlus/Structured",isDirectory:true)
         try? FileManager.default.createDirectory(at:self.support,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        editor.onProtectedEdit={[weak self] in self?.status="첨부·복합 표·지정 서체의 원본은 유지합니다. 본문은 계속 편집할 수 있습니다."}
+        editor.previewProvider={[weak self] attachmentID in
+            guard let self,let account=self.account,let id=self.selectedID else{return nil}
+            guard let preview=try? await self.client.request("preview",account:account,payload:["id":id,"attachmentID":attachmentID],as:CloudPreview.self),let data=preview.data else{return nil}
+            return Data(base64Encoded:data)
+        }
         guard startTasks else{return}
         Task {
             for draft in await disk.drafts(in:self.support) {if states[draft.base.id]==nil{let s=CloudNoteState(draft.base);s.document=draft.document;s.dirty=true;s.unsavedSince=Date();states[s.base.id]=s}}

@@ -71,6 +71,7 @@ struct IntegratedWindow:View {
                 if let error=model.selectionError {HStack{Text(error);Spacer();Button("닫기"){model.selectionError=nil}}.font(.caption).padding(10).background(.orange.opacity(0.12))}
                 if let note=model.snapshot {
                     if let reason=note.readOnlyReason{Text("읽기 전용 · \(reason)").font(.caption).foregroundStyle(.secondary).padding(12).frame(maxWidth:.infinity,alignment:.leading).background(.orange.opacity(0.1))}
+                    if note.readOnlyReason==nil && (model.document.tables.contains{$0.protected==true} || model.document.paragraphs.contains{$0.spans.contains{$0.embed != nil || $0.style?.protected==true}}){Text("첨부와 복합 표의 원본을 유지하며 본문을 편집합니다.").font(.caption).foregroundStyle(.secondary).padding(6)}
                     if model.conflict != nil {HStack{Text("양쪽에서 같은 부분이 변경되었습니다. 작성본은 보관됩니다.");Spacer();Button("두 버전 확인"){showConflict=true}}.font(.caption).padding(10).background(.orange.opacity(0.12))}
                     if settings.showNoteDate {Text(Date(timeIntervalSince1970:(note.modified ?? note.created)/1000),format:.dateTime.year().month().day().hour().minute()).font(.caption).foregroundStyle(.secondary).padding(8)}
                     StructuredEditor(document:model.document,identity:note.id,revision:model.revision,size:settings.fontSize,ratio:settings.lineRatio,handle:model.editor,onChange:model.edited,preferences:settings.values,editable:model.canEdit,onInput:model.inputBegan)

@@ -817,8 +817,17 @@ function ensureReplica(doc: NoteDocument, replicaId: Uint8Array): number {
   // exactly the captured create shape.
   const maxTextClock = Math.max(0, ...doc.replicas.map((replica) => replica.counters[0] ?? 0));
   const maxOpClock = Math.max(0, ...doc.replicas.map((replica) => replica.counters[1] ?? 0));
-  doc.replicas.push({ id: replicaId, counters: [maxTextClock, maxOpClock] });
-  return doc.replicas.length;
+  // TTVectorMultiTimestamp is a UUID-sorted set, not registration order.
+  // Apple's decoder resolves CharID.replicaID by that sorted rank (see the
+  // same rule in tableEdit.ts). Appending a lower UUID silently reattributes
+  // existing characters on native merge, which duplicates the entire body.
+  const position = doc.replicas.filter((r) => compareBytes(r.id, replicaId) < 0).length;
+  for (const run of doc.runs) {
+    if (run.coord.replica >= position + 1) run.coord.replica += 1;
+    if (run.anchor.replica >= position + 1) run.anchor.replica += 1;
+  }
+  doc.replicas.splice(position, 0, { id: new Uint8Array(replicaId), counters: [maxTextClock, maxOpClock] });
+  return position + 1;
 }
 
 /**
@@ -953,6 +962,11 @@ function adjustAttributeRuns(doc: NoteDocument, start: number, deleteLength: num
  * since". The exposure is table-side only (audit, 2026-08-02).
  */
 export function validateDocumentInvariants(doc: NoteDocument): void {
+  for (let i = 1; i < doc.replicas.length; i += 1) {
+    if (compareBytes(doc.replicas[i - 1]!.id, doc.replicas[i]!.id) >= 0) {
+      throw new Error("문서의 동기화 이력 순서가 올바르지 않아 저장을 중단했습니다. 원본을 보존합니다.");
+    }
+  }
   const visibleLength = doc.runs.filter((run) => !run.tombstone).reduce((sum, run) => sum + run.length, 0);
   if (visibleLength !== doc.text.length) {
     throw new Error(

@@ -1,8 +1,10 @@
 import AppKit
 import SwiftUI
+import ImageIO
 
 extension NSAttributedString.Key {
     static let npKind=Self("NotesPlus.kind"),npDone=Self("NotesPlus.done"),npIndent=Self("NotesPlus.indent"),npNumber=Self("NotesPlus.number"),npQuote=Self("NotesPlus.quote"),npTable=Self("NotesPlus.table"),npRow=Self("NotesPlus.row"),npColumn=Self("NotesPlus.column")
+    static let npHasMedia=Self("NotesPlus.hasMedia"),npTableAnchor=Self("NotesPlus.tableAnchor"),npStyle=Self("NotesPlus.richStyle"),npParagraph=Self("NotesPlus.paragraphExtra"),npEmbed=Self("NotesPlus.embed"),npProtected=Self("NotesPlus.protected")
     static let npInlineBold=Self("NotesPlus.inlineBold"),npInlineItalic=Self("NotesPlus.inlineItalic")
 }
 final class ListMarkerCell:NSTextAttachmentCell {
@@ -23,10 +25,21 @@ final class ListMarkerCell:NSTextAttachmentCell {
         }
     }
 }
+final class PreservedAttachmentCell:NSTextAttachmentCell {
+    var previewImage:NSImage?
+    let attachmentTitle:String
+    init(_ title:String){self.attachmentTitle=title;super.init(textCell:"")}
+    required init(coder:NSCoder){attachmentTitle="첨부 · 원본 유지";super.init(coder:coder)}
+    override func cellSize()->NSSize{previewImage==nil ? NSSize(width:220,height:54):NSSize(width:280,height:180)}
+    override func cellBaselineOffset()->NSPoint{NSPoint(x:0,y:-10)}
+    override func draw(withFrame rect:NSRect,in controlView:NSView?){if let image=previewImage{let scale=min(rect.width/image.size.width,rect.height/image.size.height);image.draw(in:NSRect(x:rect.minX,y:rect.minY,width:image.size.width*scale,height:image.size.height*scale));return};NSColor.quaternaryLabelColor.setFill();NSBezierPath(roundedRect:rect.insetBy(dx:1,dy:2),xRadius:8,yRadius:8).fill();(attachmentTitle as NSString).draw(in:rect.insetBy(dx:12,dy:17),withAttributes:[.font:NSFont.systemFont(ofSize:13),.foregroundColor:NSColor.secondaryLabelColor])}
+}
 @MainActor final class StructuredEditorHandle:ObservableObject {
     weak var view:StructuredTextView?
     var flushPending:(()->Void)?
+    var onProtectedEdit:(()->Void)?
     var focusOnLoad=false
+    var previewProvider:((String) async->Data?)?
     func flush(){flushPending?()}
     func format(_ kind:String) {view?.setParagraphKind(kind)}
     func inline(_ key:String) {view?.toggleInline(key)}
@@ -34,6 +47,19 @@ final class ListMarkerCell:NSTextAttachmentCell {
 }
 
 enum StructuredCodec {
+    static func pack<T:Encodable>(_ value:T)->String{let encoder=JSONEncoder();encoder.outputFormatting=[.sortedKeys];return String(data:(try? encoder.encode(value)) ?? Data(),encoding:.utf8) ?? ""}
+    static func unpack<T:Decodable>(_ type:T.Type,_ value:Any?)->T?{guard let string=value as? String else{return nil};return try? JSONDecoder().decode(type,from:Data(string.utf8))}
+    static func richAttributes(_ rich:CloudRichStyle,font:NSFont)->[NSAttributedString.Key:Any]{
+        var a:[NSAttributedString.Key:Any]=[.npStyle:pack(rich)]
+        if let name=rich.fontName,!name.isEmpty{a[.font]=NSFont(name:name,size:(rich.fontSize ?? 0)>0 ? rich.fontSize!:font.pointSize) ?? font}
+        else if let size=rich.fontSize,size>0{a[.font]=font.withSize(size)}
+        if let c=rich.color,c.count==4,c.allSatisfy({$0.isFinite}){a[.foregroundColor]=NSColor(srgbRed:c[0],green:c[1],blue:c[2],alpha:c[3])}
+        if let sup=rich.superscript{a[.superscript]=sup}
+        // Value 1 verified against a native Notes purple-highlight fixture.
+        if rich.emphasis==1{a[.backgroundColor]=NSColor.systemPurple.withAlphaComponent(0.28)}
+        if rich.protected==true{a[.npProtected]="span"}
+        return a
+    }
     static func attributes(_ p:CloudParagraph,size:Double,ratio:Double)->[NSAttributedString.Key:Any] {
         let style=NSMutableParagraphStyle();style.paragraphSpacing=4
         let isList=p.kind.hasSuffix("List")
@@ -41,7 +67,10 @@ enum StructuredCodec {
         let fontSize=size+(p.kind=="title" ? 7 : p.kind=="heading" ? 4 : p.kind=="subheading" ? 2:0)
         style.minimumLineHeight=fontSize*ratio;style.maximumLineHeight=fontSize*ratio
         let font=p.kind=="monospaced" ? NSFont.monospacedSystemFont(ofSize:fontSize,weight:.regular) : NSFont.systemFont(ofSize:fontSize,weight:["title","heading","subheading"].contains(p.kind) ? .semibold:.regular)
-        return [.font:font,.foregroundColor:NSColor.labelColor,.paragraphStyle:style,.npKind:p.kind,.npDone:p.done ?? false,.npIndent:p.indent,.npNumber:p.startNumber,.npQuote:p.blockQuoteLevel,.npInlineBold:false,.npInlineItalic:false]
+        var result:[NSAttributedString.Key:Any]=[.font:font,.foregroundColor:NSColor.labelColor,.paragraphStyle:style,.npKind:p.kind,.npDone:p.done ?? false,.npIndent:p.indent,.npNumber:p.startNumber,.npQuote:p.blockQuoteLevel,.npInlineBold:false,.npInlineItalic:false]
+        if let extra=p.paragraphStyle{result[.npParagraph]=pack(extra);style.alignment=[0:NSTextAlignment.left,1:.center,2:.right,3:.justified,4:.natural][extra.alignment] ?? .natural;style.baseWritingDirection=extra.direction==2 || extra.direction==4 ? .rightToLeft:extra.direction==1 || extra.direction==3 ? .leftToRight:.natural}
+        if p.spans.contains(where:{$0.embed != nil}){style.maximumLineHeight=0;result[.npHasMedia]=true}
+        return result
     }
     static func prefix(kind:String,done:Bool,number:Int,attributes:[NSAttributedString.Key:Any])->NSAttributedString {
         let attachment=NSTextAttachment();attachment.attachmentCell=ListMarkerCell(kind:kind,done:done,number:number)
@@ -58,7 +87,7 @@ enum StructuredCodec {
                     block.setValue(100/CGFloat(max(1,cells.count)),type:.percentageValueType,for:.width)
                     var attrs=attributes(CloudParagraph(),size:size,ratio:ratio)
                     let style=(attrs[.paragraphStyle] as! NSParagraphStyle).mutableCopy() as! NSMutableParagraphStyle;style.textBlocks=[block];attrs[.paragraphStyle]=style
-                    attrs[.npTable]=id;attrs[.npRow]=row;attrs[.npColumn]=column
+                    attrs[.npTable]=id;attrs[.npRow]=row;attrs[.npColumn]=column;attrs[.npTableAnchor]=pack(p);if table.protected==true{attrs[.npProtected]="table"}
                     out.append(NSAttributedString(string:text+"\n",attributes:attrs))
                 }}
                 number=0;continue
@@ -73,6 +102,8 @@ enum StructuredCodec {
                 if span.bold {font=NSFontManager.shared.convert(font,toHaveTrait:.boldFontMask)}
                 if span.italic {font=NSFontManager.shared.convert(font,toHaveTrait:.italicFontMask)}
                 extras[.font]=font
+                if let rich=span.style{extras.merge(richAttributes(rich,font:font)){_,new in new}}
+                if let embed=span.embed{let attachment=NSTextAttachment();attachment.attachmentCell=PreservedAttachmentCell(embed.title+" · 원본 유지");extras[.attachment]=attachment;extras[.npEmbed]=pack(embed)}
                 extras[.npInlineBold]=span.bold;extras[.npInlineItalic]=span.italic
                 if span.underline {extras[.underlineStyle]=NSUnderlineStyle.single.rawValue}
                 if span.strikethrough {extras[.strikethroughStyle]=NSUnderlineStyle.single.rawValue}
@@ -80,7 +111,7 @@ enum StructuredCodec {
                 body.addAttributes(extras,range:NSRange(location:at,length:span.length));at+=span.length
             }
             out.append(body)
-            if index<document.paragraphs.count-1 {out.append(NSAttributedString(string:p.separator?.isEmpty==false ? p.separator! : "\n",attributes:attrs))}
+            if index<document.paragraphs.count-1 {var separatorAttrs=attrs;if let rich=p.separatorStyle{separatorAttrs.merge(richAttributes(rich,font:attrs[.font] as! NSFont)){_,new in new}};out.append(NSAttributedString(string:p.separator?.isEmpty==false ? p.separator! : "\n",attributes:separatorAttrs))}
         }
         return out
     }
@@ -95,8 +126,8 @@ enum StructuredCodec {
             if let id=attrs[.npTable] as? String {
                 let row=attrs[.npRow] as? Int ?? 0,col=attrs[.npColumn] as? Int ?? 0
                 if tableIndex[id]==nil {
-                    tableIndex[id]=tables.count;tables.append(CloudTable(id:id,grid:[]))
-                    var p=CloudParagraph(text:"\u{fffc}");p.tableID=id;p.separator="\n";paragraphs.append(p)
+                    tableIndex[id]=tables.count;tables.append(CloudTable(id:id,grid:[],protected:attrs[.npProtected] as? String=="table" ? true:nil))
+                    var p=unpack(CloudParagraph.self,attrs[.npTableAnchor]) ?? CloudParagraph(text:"\u{fffc}");p.tableID=id;paragraphs.append(p)
                 }
                 let ti=tableIndex[id]!
                 while tables[ti].grid.count<=row {tables[ti].grid.append([])}
@@ -109,15 +140,16 @@ enum StructuredCodec {
                    storage.attribute(.npColumn,at:NSMaxRange(range),effectiveRange:nil) as? Int==col {tables[ti].grid[row][col]+=separator}
             } else {
                 let kind=attrs[.npKind] as? String ?? "body"
-                let prefix=kind.hasSuffix("List") && storage.attribute(.attachment,at:at,effectiveRange:nil) is NSTextAttachment ? min(2,contentLength):0
+                let prefix=kind.hasSuffix("List") && (storage.attribute(.attachment,at:at,effectiveRange:nil) as? NSTextAttachment)?.attachmentCell is ListMarkerCell ? min(2,contentLength):0
                 let content=NSRange(location:at+prefix,length:contentLength-prefix)
                 var p=CloudParagraph(text:string.substring(with:content),kind:kind)
                 p.indent=attrs[.npIndent] as? Int ?? 0;p.blockQuoteLevel=attrs[.npQuote] as? Int ?? 0;p.startNumber=attrs[.npNumber] as? Int ?? 0;p.separator=separator
+                p.paragraphStyle=unpack(CloudParagraphStyle.self,attrs[.npParagraph]);if !separator.isEmpty{p.separatorStyle=unpack(CloudRichStyle.self,storage.attribute(.npStyle,at:at+contentLength,effectiveRange:nil))}
                 p.done=kind=="todoList" ? (attrs[.npDone] as? Bool ?? false):nil;p.spans=[]
                 storage.enumerateAttributes(in:content) {a,r,_ in
                     let traits=(a[.font] as? NSFont).map{NSFontManager.shared.traits(of:$0)} ?? []
-                    let span=CloudSpan(length:r.length,bold:a[.npInlineBold] as? Bool ?? traits.contains(.boldFontMask),italic:a[.npInlineItalic] as? Bool ?? traits.contains(.italicFontMask),underline:(a[.underlineStyle] as? Int ?? 0)>0,strikethrough:(a[.strikethroughStyle] as? Int ?? 0)>0,link:(a[.link] as? URL)?.absoluteString ?? a[.link] as? String ?? "")
-                    if var last=p.spans.last,CloudSpan(length:span.length,bold:last.bold,italic:last.italic,underline:last.underline,strikethrough:last.strikethrough,link:last.link)==span {last.length+=span.length;p.spans[p.spans.count-1]=last}else{p.spans.append(span)}
+                    let span=CloudSpan(length:r.length,bold:a[.npInlineBold] as? Bool ?? traits.contains(.boldFontMask),italic:a[.npInlineItalic] as? Bool ?? traits.contains(.italicFontMask),underline:(a[.underlineStyle] as? Int ?? 0)>0,strikethrough:(a[.strikethroughStyle] as? Int ?? 0)>0,link:(a[.link] as? URL)?.absoluteString ?? a[.link] as? String ?? "",style:unpack(CloudRichStyle.self,a[.npStyle]),embed:unpack(CloudEmbed.self,a[.npEmbed]))
+                    if var last=p.spans.last{let oldLength=last.length;last.length=span.length;if last==span && span.embed==nil{last.length=oldLength+span.length;p.spans[p.spans.count-1]=last}else{p.spans.append(span)}}else{p.spans.append(span)}
                 }
                 paragraphs.append(p)
             }
@@ -131,6 +163,8 @@ enum StructuredCodec {
 final class StructuredTextView:NSTextView {
     var size=17.0,ratio=1.6
     var preferences=Preferences()
+    var onProtectedEdit:(()->Void)?
+    func refuseEdit(){NSSound.beep();onProtectedEdit?()}
     var structuralEditing=false
     @objc func insertTimestamp(_ sender:Any?){guard isEditable,!hasMarkedText() else{return};insertText(TimestampFormat.string(format:preferences.timestampFormat),replacementRange:selectedRange())}
     var onChange:(()->Void)?
@@ -138,7 +172,16 @@ final class StructuredTextView:NSTextView {
     override func paste(_ sender:Any?) {super.pasteAsPlainText(sender)}
     func paragraphRange()->NSRange {(string as NSString).paragraphRange(for:NSRange(location:min(selectedRange().location,(string as NSString).length),length:0))}
     func attrsAtCaret()->[NSAttributedString.Key:Any] {let at=selectedRange().location;return at<(textStorage?.length ?? 0) ? textStorage!.attributes(at:at,effectiveRange:nil):typingAttributes}
+    func permitsEdit(_ range:NSRange)->Bool {
+        guard let storage=textStorage else{return true};let r=range.location==NSNotFound ? selectedRange():range
+        guard r.location<=storage.length,NSMaxRange(r)<=storage.length else{return false}
+        if r.length>0{var protected=false;storage.enumerateAttributes(in:r){a,_,_ in if a[.npEmbed] != nil || a[.npProtected] != nil{protected=true}};return !protected}
+        if r.location<storage.length{var effective=NSRange();let a=storage.attributes(at:r.location,effectiveRange:&effective);if a[.npProtected] as? String=="table"{return false};if a[.npProtected] != nil && r.location>effective.location{return false}}
+        return true
+    }
     override func insertText(_ insertString:Any,replacementRange:NSRange) {
+        guard permitsEdit(replacementRange) else{refuseEdit();return}
+        if insertString is String{typingAttributes.removeValue(forKey:.npEmbed);typingAttributes.removeValue(forKey:.attachment);if typingAttributes[.npProtected] != nil{typingAttributes.removeValue(forKey:.npStyle);typingAttributes.removeValue(forKey:.npProtected)}}
         super.insertText(insertString,replacementRange:replacementRange)
         guard isEditable,!converting,!hasMarkedText(),(insertString as? String)==" ",attrsAtCaret()[.npTable]==nil else{return}
         let range=paragraphRange(),line=(string as NSString).substring(with:range).trimmingCharacters(in:.newlines)
@@ -155,6 +198,7 @@ final class StructuredTextView:NSTextView {
     override func deleteBackward(_ sender:Any?) {
         let range=paragraphRange()
         if !hasMarkedText(),selectedRange().length==0,selectedRange().location==range.location+2,attrsAtCaret()[.npTable]==nil,(attrsAtCaret()[.npKind] as? String ?? "").hasSuffix("List") {setParagraphKind("body");setSelectedRange(NSRange(location:range.location,length:0));return}
+        let deletion=selectedRange().length>0 ? selectedRange():NSRange(location:max(0,selectedRange().location-1),length:selectedRange().location>0 ? 1:0);guard permitsEdit(deletion) else{refuseEdit();return}
         super.deleteBackward(sender)
     }
     override func insertTab(_ sender:Any?) {
@@ -203,6 +247,11 @@ final class StructuredTextView:NSTextView {
     func toggleInline(_ key:String) {
         guard isEditable,!hasMarkedText() else{return}
         let range=selectedRange();var attrs=attrsAtCaret()
+        if key=="bold" || key=="italic" {
+            var explicitFont=StructuredCodec.unpack(CloudRichStyle.self,attrs[.npStyle])?.fontName != nil
+            if range.length>0{textStorage?.enumerateAttribute(.npStyle,in:range){value,_,_ in if StructuredCodec.unpack(CloudRichStyle.self,value)?.fontName != nil{explicitFont=true}}}
+            if explicitFont{refuseEdit();return}
+        }
         guard attrs[.npTable]==nil else{NSSound.beep();return}
         if key=="bold" || key=="italic" {
             let font=attrs[.font] as? NSFont ?? NSFont.systemFont(ofSize:size),trait:NSFontTraitMask=key=="bold" ? .boldFontMask:.italicFontMask
@@ -282,7 +331,7 @@ struct StructuredEditor:NSViewRepresentable {
     func updateNSView(_ scroll:NSScrollView,context:Context) {
         let c=context.coordinator;c.parent=self
         guard let view=scroll.documentView as? StructuredTextView else{return}
-        view.size=size;view.ratio=ratio;view.preferences=preferences;view.isEditable=editable
+        view.size=size;view.ratio=ratio;view.preferences=preferences;view.isEditable=editable;view.onProtectedEdit=handle.onProtectedEdit
         view.isContinuousSpellCheckingEnabled=preferences.spellChecking;view.isGrammarCheckingEnabled=preferences.grammarChecking
         view.isAutomaticSpellingCorrectionEnabled=preferences.spellingCorrection;view.isAutomaticTextReplacementEnabled=preferences.textReplacement
         view.isAutomaticDashSubstitutionEnabled=preferences.smartDashes;view.isAutomaticQuoteSubstitutionEnabled=preferences.smartQuotes
@@ -305,9 +354,36 @@ struct StructuredEditor:NSViewRepresentable {
             if handle.focusOnLoad {handle.focusOnLoad=false;view.window?.makeFirstResponder(view)}
         }
         if c.style != style {c.updating=true;StructuredCodec.applyDisplay(preferences,to:view);c.updating=false;c.style=style}
+        if c.previewKey != key {c.previewKey=key;c.previewTask?.cancel()
+            let ids=Array(Set(document.paragraphs.flatMap{$0.spans.compactMap{$0.embed?.id}}))
+            // Keep a decoded preview across a remote text/check-state refresh.
+            // Revalidate asynchronously; never make text editing wait for media.
+            for id in ids {if let image=c.previews[identity+":"+id]{c.installPreview(image,id:id,in:view)}}
+            c.previewTask=Task{[weak view,weak c] in
+                for id in ids {guard !Task.isCancelled,let data=await handle.previewProvider?(id) else{continue}
+                    let thumbnail=await Task.detached(priority:.utility){()->CGImage? in
+                        guard let source=CGImageSourceCreateWithData(data as CFData,[kCGImageSourceShouldCache:false] as CFDictionary) else{return nil}
+                        return CGImageSourceCreateThumbnailAtIndex(source,0,[kCGImageSourceCreateThumbnailFromImageAlways:true,kCGImageSourceThumbnailMaxPixelSize:560,kCGImageSourceCreateThumbnailWithTransform:true,kCGImageSourceShouldCacheImmediately:true] as CFDictionary)
+                    }.value
+                    guard !Task.isCancelled,let thumbnail,let view,let c,c.previewKey==key else{continue}
+                    let image=NSImage(cgImage:thumbnail,size:NSSize(width:thumbnail.width,height:thumbnail.height))
+                    if c.previews.count>=32{c.previews.removeAll()};c.previews[identity+":"+id]=image
+                    c.installPreview(image,id:id,in:view)
+                }
+            }
+        }
     }
     @MainActor final class Coordinator:NSObject,NSTextViewDelegate {
         var parent:StructuredEditor;var loaded="",identity="",updating=false,pending=false;var style:Preferences?;let undo=UndoManager()
+        var previewKey="";var previewTask:Task<Void,Never>?
+        var previews:[String:NSImage]=[:]
+        func installPreview(_ image:NSImage,id:String,in view:StructuredTextView){
+            guard let storage=view.textStorage else{return}
+            storage.enumerateAttributes(in:NSRange(location:0,length:storage.length)){a,r,_ in
+                guard StructuredCodec.unpack(CloudEmbed.self,a[.npEmbed])?.id==id,let cell=(a[.attachment] as? NSTextAttachment)?.attachmentCell as? PreservedAttachmentCell else{return}
+                cell.previewImage=image;view.layoutManager?.invalidateLayout(forCharacterRange:r,actualCharacterRange:nil);view.layoutManager?.invalidateDisplay(forCharacterRange:r)
+            }
+        }
         var task:Task<Void,Never>?,firstPending=Date.distantPast
         init(_ parent:StructuredEditor){self.parent=parent}
         func undoManager(for view:NSTextView)->UndoManager? {undo}
@@ -329,7 +405,9 @@ struct StructuredEditor:NSViewRepresentable {
             view.refreshNumbers();parent.onChange(StructuredCodec.capture(view))
         }
         func textView(_ textView:NSTextView,shouldChangeTextIn affectedCharRange:NSRange,replacementString:String?)->Bool {
-            guard let view=textView as? StructuredTextView,!view.structuralEditing,let storage=view.textStorage,affectedCharRange.length>0 else{return true}
+            guard let view=textView as? StructuredTextView else{return true}
+            guard view.permitsEdit(affectedCharRange) else{view.refuseEdit();return false}
+            guard !view.structuralEditing,let storage=view.textStorage,affectedCharRange.length>0 else{return true}
             // Standard deletion/paste cannot cut across cell boundaries. Dedicated
             // table commands preserve cell identities and manage those edits.
             var cells=Set<String>(),hasBody=false
@@ -370,9 +448,9 @@ extension StructuredCodec {
             var font=kind=="monospaced" ? NSFont.monospacedSystemFont(ofSize:size,weight:weight):p.fontName=="system" ? NSFont.systemFont(ofSize:size,weight:weight):NSFont(name:p.fontName,size:size) ?? NSFont.systemFont(ofSize:size,weight:weight)
             if bold {font=NSFontManager.shared.convert(font,toHaveTrait:.boldFontMask)};if italic{font=NSFontManager.shared.convert(font,toHaveTrait:.italicFontMask)}
             let style=(a[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
-            style.minimumLineHeight=size*p.lineRatio;style.maximumLineHeight=size*p.lineRatio;style.paragraphSpacing=p.paragraphSpacing
+            style.minimumLineHeight=size*p.lineRatio;style.maximumLineHeight=(a[.npHasMedia] as? Bool==true) ? 0:size*p.lineRatio;style.paragraphSpacing=p.paragraphSpacing
             style.defaultTabInterval=font.pointSize*0.55*Double(p.tabWidth)
-            changes.append((r,[.font:font,.paragraphStyle:style,.kern:p.characterSpacing]))
+            var display:[NSAttributedString.Key:Any]=[.font:font,.paragraphStyle:style,.kern:p.characterSpacing];if let rich=unpack(CloudRichStyle.self,a[.npStyle]){display.merge(richAttributes(rich,font:font)){_,new in new}};changes.append((r,display))
         }
         storage.beginEditing();for (r,a) in changes{storage.addAttributes(a,range:r)};storage.endEditing()
         if view.selectedRange().location<storage.length{view.typingAttributes=storage.attributes(at:view.selectedRange().location,effectiveRange:nil)}
@@ -392,7 +470,7 @@ extension StructuredTextView {
         typingAttributes=attrsAtCaret();window?.makeFirstResponder(self);undoManager?.setActionName("표 삽입")
     }
     func resizeTable(_ action:String) {
-        guard isEditable,!hasMarkedText(),let storage=textStorage,let id=attrsAtCaret()[.npTable] as? String else{return}
+        guard isEditable,!hasMarkedText(),attrsAtCaret()[.npProtected]==nil,let storage=textStorage,let id=attrsAtCaret()[.npTable] as? String else{return}
         let attrs=attrsAtCaret(),row=attrs[.npRow] as? Int ?? 0,col=attrs[.npColumn] as? Int ?? 0
         let doc=StructuredCodec.capture(self);guard var table=doc.tables.first(where:{$0.id==id}),!table.grid.isEmpty else{return}
         switch action {
